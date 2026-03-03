@@ -1984,6 +1984,12 @@ class TOPSIM_EagleEye_V5:
         print("  " + "-"*25 + " " + "-"*12 + " " + "-"*12 + " " + "-"*12)
 
         best_decisions = s_backup.copy()
+        best_decisions["neue_anlagen_a"] = 0
+        best_decisions["neue_anlagen_b"] = 0
+        best_decisions["personal_aenderung_fert"] = 0
+        best_decisions["fe_personal_aenderung"] = 0
+        best_decisions["markt2_aktiv"] = s_backup.get("markt2_offen", False)
+
         for key, val in study.best_params.items():
             best_decisions[key] = val
             akt = s_backup.get(key, 0)
