@@ -18,7 +18,7 @@
   "loehne_steigerung": 1.03,
   "transport_stueck": 25,
   "grossabnehmer_preis": 2700,
-  "fixkosten_basis": 15.14,
+  "fixkosten_basis": 5.13,
   "einkauf_staffel": [
     [
       42000,

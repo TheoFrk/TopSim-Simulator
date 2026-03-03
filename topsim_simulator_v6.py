@@ -11,6 +11,8 @@ import glob as globmod
 from copy import deepcopy
 
 import numpy as np
+import optuna
+optuna.logging.set_verbosity(optuna.logging.WARNING)
 from scipy.optimize import least_squares, minimize, differential_evolution
 
 
@@ -309,7 +311,8 @@ class ReportParser:
     def _parse_markt(self, data):
         try:
             rows = self.wb.sheet("2) Marktforschungsbericht")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Markt' nicht gefunden oder fehlerhaft: {e}")
             return
         u_col = self._find_u_col(rows[3])
         if u_col is None:
@@ -375,7 +378,8 @@ class ReportParser:
     def _parse_fertigung(self, data):
         try:
             rows = self.wb.sheet("3) Fertigungsbericht")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Fertigung' nicht gefunden oder fehlerhaft: {e}")
             return
         for row in rows:
             label = str(row[0]).strip()
@@ -412,25 +416,31 @@ class ReportParser:
     def _parse_fe(self, data):
         try:
             rows = self.wb.sheet("4) Forschung & Entwicklung")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt '4) Forschung & Entwicklung' nicht gefunden oder fehlerhaft: {e}")
             return
+        g1_found = False
+        g2_found = False
         for row in rows:
             row_str = " ".join(str(v) for v in row)
-            if "Gen. 1" in row_str or "Gen 1" in row_str:
+            if not g1_found and ("Gen. 1" in row_str or "Gen 1" in row_str):
                 nums = [v for v in row if isinstance(v, (int, float))]
                 if len(nums) >= 2:
                     data["fe_invest_gen1"] = float(nums[0])
                     data["tech_index_result"] = float(nums[1])
-            if "Gen. 2" in row_str or "Gen 2" in row_str:
+                    g1_found = True
+            if not g2_found and ("Gen. 2" in row_str or "Gen 2" in row_str):
                 nums = [v for v in row if isinstance(v, (int, float))]
                 if len(nums) >= 2:
                     data["fe_invest_gen2"] = float(nums[0])
                     data["tech_index_gen2"] = float(nums[1])
+                    g2_found = True
 
     def _parse_lager(self, data):
         try:
             rows = self.wb.sheet("5) Lager")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Lager' nicht gefunden oder fehlerhaft: {e}")
             return
         for row in rows:
             label = str(row[0]).strip()
@@ -441,7 +451,8 @@ class ReportParser:
     def _parse_personal(self, data):
         try:
             rows = self.wb.sheet("6) Personal")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Personal' nicht gefunden oder fehlerhaft: {e}")
             return
         for row in rows:
             label = str(row[0]).strip()
@@ -458,7 +469,8 @@ class ReportParser:
     def _parse_deckungsbeitrag(self, data):
         try:
             rows = self.wb.sheet("10) Deckungsbeitragsrechnung")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Deckungsbeitrag' nicht gefunden oder fehlerhaft: {e}")
             return
         for row in rows:
             label = str(row[0]).strip()
@@ -479,7 +491,8 @@ class ReportParser:
     def _parse_guv(self, data):
         try:
             rows = self.wb.sheet("11) Gewinn- und Verlustrechnung")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'GuV' nicht gefunden oder fehlerhaft: {e}")
             return
         for row in rows:
             label = str(row[0]).strip()
@@ -505,7 +518,8 @@ class ReportParser:
     def _parse_bilanz(self, data):
         try:
             rows = self.wb.sheet("14) Bilanz")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Bilanz' nicht gefunden oder fehlerhaft: {e}")
             return
         for row in rows:
             label = str(row[0]).strip()
@@ -528,7 +542,8 @@ class ReportParser:
     def _parse_wertorientiert(self, data):
         try:
             rows = self.wb.sheet("16) Wertorientierte Kennzahlen")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt 'Wertorientiert' nicht gefunden oder fehlerhaft: {e}")
             return
         col = self._get_period_col(rows)
         for key, label in [
@@ -549,7 +564,8 @@ class ReportParser:
     def _parse_entscheidungen(self, data):
         try:
             rows = self.wb.sheet("17) Entscheidungsprotokoll")
-        except (KeyError, Exception):
+        except (KeyError, Exception) as e:
+            print(f"  WARNUNG: Tabellenblatt '17) Entscheidungsprotokoll' nicht gefunden oder fehlerhaft: {e}")
             return
 
         def _last_numeric(row):
@@ -570,6 +586,7 @@ class ReportParser:
         }
         for row in rows:
             label = str(row[0]).strip()
+            row_str = " ".join(str(v) for v in row)
             for search, key in label_map.items():
                 if search in label:
                     val = _safe_float(row[col]) if col < len(row) and isinstance(row[col], (int, float)) else 0.0
@@ -578,8 +595,39 @@ class ReportParser:
                     decisions[key] = val
             if "Investition" in label and "Typ A" in label:
                 decisions["neue_anlagen_a"] = _safe_float(row[col]) if col < len(row) else 0.0
-            if "Einstellungen/Entlassungen" in label:
+            elif "Einstellungen/Entlassungen" in label:
                 decisions["personal_aenderung_fert"] = _last_numeric(row)
+            elif "Gen. 2" in row_str and "Technologie" in row_str and "Personal" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["personal_fe_gen2"] = float(nums[0]) if nums else 0.0
+            elif "Technologie Personal" in row_str or ("Technologie" in row_str and "Personalendbestand" in row_str):
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["personal_fe"] = float(nums[0]) if nums else 35.0
+                decisions["personal_fe"] = data["personal_fe"]
+            elif "Vertrieb" in row_str and "Anz" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["vertrieb_ma"] = int(nums[0]) if len(nums) > 0 else data.get("vertrieb_ma", 100)
+                data["vertrieb_m2"] = int(nums[1]) if len(nums) > 1 else 0
+            elif "Einsatzstoffe" in row_str or "Teile" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["einkauf_menge"] = float(nums[0]) if nums else 45000.0
+            elif "Marktforschungsbericht" in row_str:
+                # Checkbox: prüfe ob eine 1, True oder "x" in der Zeile steht
+                data["marktforschung_aktiv"] = any(v in (1, True, "x", "X", "ja", "Ja") for v in row)
+            elif "Ökologie" in row_str and "Gen. 1" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["oeko_budget_gen1"] = float(nums[0]) if nums else 0.0
+            elif "Ökologie" in row_str and "Gen. 2" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["oeko_budget_gen2"] = float(nums[0]) if nums else 0.0
+            elif "Corporate Identity" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["ci_budget"] = float(nums[0]) if nums else 0.0
+            elif "Großabnehmer" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                data["grossabnehmer"] = int(nums[0]) if nums else 0
+            elif "Desinvestitionen" in row_str or "Anlage Nr." in row_str:
+                data["desinvest"] = []
         data["decisions"] = decisions
 
 
@@ -1673,7 +1721,7 @@ class TOPSIM_EagleEye_V5:
         "werbung_m1":            (4.0,  18.0),
         "vertrieb_ma":           (70,   160),
         "fertigungsmenge":       (30000, 55000),
-        "fe_invest_gen1":        (1.0,  8.0),
+        "fe_invest_gen1":        (25.0, 90.0),
         "oeko_budget":           (0.0,  2.0),
         "ci_budget":             (0.0,  2.0),
         "rationalisierung":      (0.0,  5.0),
@@ -1875,177 +1923,72 @@ class TOPSIM_EagleEye_V5:
         # -----------------------------------------------
 
         markt2_offen = self._is_markt2_open_for_period(tp)
-
-        var_names = list(self.DECISION_BOUNDS.keys())
-        bounds = [self.DECISION_BOUNDS[k] for k in var_names]
-        if markt2_offen:
-            var_names.extend(["preis_m2", "werbung_m2"])
-            bounds.extend([(3000, 6500), (0.0, 8.0)])
-        bounds_map = dict(zip(var_names, bounds))
-
-        int_vars = {
-            "vertrieb_ma", "fertigungsmenge", "neue_anlagen_a", "neue_anlagen_b",
-            "personal_aenderung_fert", "fe_personal_aenderung", "grossabnehmer",
-        }
-
-        # Skalierung fuer die Zielfunktion
-        ref_vals = {
-            "aktienkurs": max(200, self.state.get("eigenkapital", 30) * 5),
-            "ebit": 30.0, "eigenkapital": 50.0, "mva": 80.0,
-            "kz_index": 70.0, "periodenueberschuss": 15.0, "tech_index": 110.0,
-        }
-
-        def objective(x):
-            d = {}
-            for i, name in enumerate(var_names):
-                val = x[i]
-                if name in int_vars:
-                    val = round(val)
-                d[name] = val
-            d["markt2_aktiv"] = markt2_offen
-            if not markt2_offen:
-                d["preis_m2"] = d["werbung_m2"] = 0
-
-            # V6.1: Robust Optimization (Minimax) - Teste 3 Markt-Szenarien
-            szenarien = [
-                ("expected", s_backup),
-                # Pessimistic: Gegner senken Preise aggressiv, kein Spillover
-                ("pessimistic", {**s_backup, "branche_avg_preis": max(2800, s_backup.get("branche_avg_preis", 3000) - 150), "branche_nicht_gedeckt": 0}),
-                # Optimistic: Gegner erhoehen Preise
-                ("optimistic", {**s_backup, "branche_avg_preis": min(4500, s_backup.get("branche_avg_preis", 3000) + 100)}),
-            ]
-
-            worst_score = float('inf')
-
-            try:
-                for sz_name, sz_state in szenarien:
-                    erg = self._berechne_mit_news(d, state_override=sz_state, target_period=tp)
-
-                    # Basis-Strafterme
-                    penalty = 0
-                    kz = erg.get("kz_index", 50)
-                    if kz < 40:
-                        penalty += (40 - kz) * 0.5
-                    if kz < 30:
-                        penalty += (30 - kz) * 1.0
-                    ueberz = erg.get("ueberziehung", 0)
-                    if ueberz > 40:
-                        penalty += (ueberz - 40) / 20 * 0.2
-
-                    # V6.1 Spezial-Strafe: Lagerbestand toetet den Cashflow
-                    lager = erg.get("neues_lager", 0)
-                    if lager > 15000:
-                        penalty += (lager - 15000) / 2000 * 2.0
-                    elif lager > 10000:
-                        penalty += (lager - 10000) / 5000 * 0.5
-
-                    # Score berechnen
-                    if ziel == "balanced":
-                        score = 0
-                        for key, cfg in self.ZIEL_GEWICHTE.items():
-                            val = erg.get(key, 0)
-                            score += cfg["w"] * val / max(ref_vals.get(key, 1), 0.01)
-                        score += 0.28 * (
-                            erg.get("tats_absatz", 0)
-                            / max(erg.get("pot_absatz", 1) + erg.get("pot_absatz_m2", 0), 1)
-                        )
-                        if 3480 <= d.get("preis_m1", 3400) <= 3520:
-                            score += 0.18
-                        sz_score = -(score - penalty)
-                    else:
-                        sz_score = -(erg.get(ziel, 0) - penalty * 10)
-
-                    # Minimax: behalte den schlechtesten Szenario-Score
-                    if sz_score > worst_score or worst_score == float('inf'):
-                        worst_score = sz_score
-
-                return worst_score
-
-            except Exception:
-                return 1e12
-
-        # Startpunkt: letzte bekannte Entscheidungen oder Defaults
-        x0 = []
-        last_d = getattr(self, "decisions", None) or {}
-        defaults = {
-            "preis_m1": self.state["preis_vor"], "werbung_m1": self.state["werbung_vor"],
-            "vertrieb_ma": self.state["personal_vertrieb"], "fertigungsmenge": 42000,
-            "fe_invest_gen1": 2.5, "oeko_budget": 0, "ci_budget": 0,
-            "rationalisierung": 0, "wertanalyse": 0, "neue_anlagen_a": 0,
-            "neue_anlagen_b": 0, "personal_aenderung_fert": 0, "fe_personal_aenderung": 0,
-            "grossabnehmer": 5000,
-            "preis_m2": 4200, "werbung_m2": 0.0,
-            "kredit": 0, "dividende": 0,
-        }
-        for name in var_names:
-            lo, hi = bounds_map[name]
-            v = last_d.get(name, defaults.get(name, (lo + hi) / 2))
-            x0.append(max(lo, min(hi, v)))
+        s_backup["markt2_offen"] = markt2_offen
 
         print(f"\n  Optimiere Entscheidungen fuer P{tp} (Ziel: {ziel})...")
         if self.history.period_count() < 4:
             print("  Hinweis: <4 Perioden Historie, Optimierung ist nur als grobe Orientierung zu verstehen.")
-        print(f"  Pruefe ~500 Strategien (differential_evolution)...")
 
-        try:
-            result = differential_evolution(
-                objective, bounds=bounds,
-                seed=42, maxiter=80, popsize=15, tol=1e-5,
-                x0=x0,
-            )
-            best_x = result.x
-            best_score = -result.fun
-        except Exception as e:
-            print(f"  Optimierung fehlgeschlagen: {e}")
-            return None
+        def objective(trial):
+            d = s_backup.copy()
 
-        best_d = {}
-        for i, name in enumerate(var_names):
-            val = best_x[i]
-            if name in int_vars:
-                val = int(round(val))
+            d["preis_m1"] = trial.suggest_float("preis_m1", 2800, 4500)
+            d["werbung_m1"] = trial.suggest_float("werbung_m1", 0.0, 20.0)
+            d["vertrieb_ma"] = trial.suggest_int("vertrieb_ma", 50, 180)
+            d["fertigungsmenge"] = trial.suggest_int("fertigungsmenge", 20000, 60000)
+            d["personal_fe"] = trial.suggest_int("personal_fe", 25, 90)
+            d["personal_fe_gen2"] = trial.suggest_int("personal_fe_gen2", 0, 60)
+            d["oeko_budget_gen1"] = trial.suggest_float("oeko_budget_gen1", 0.0, 5.0)
+            d["oeko_budget_gen2"] = trial.suggest_float("oeko_budget_gen2", 0.0, 3.0)
+            d["ci_budget"] = trial.suggest_float("ci_budget", 0.0, 3.0)
+            d["rationalisierung"] = trial.suggest_float("rationalisierung", 0.0, 5.0)
+            d["wertanalyse"] = trial.suggest_float("wertanalyse", 0.0, 2.0)
+            d["grossabnehmer"] = trial.suggest_int("grossabnehmer", 0, 15000)
+
+            if s_backup.get("markt2_offen", False):
+                d["preis_m2"] = trial.suggest_float("preis_m2", 3000, 7000)
+                d["werbung_m2"] = trial.suggest_float("werbung_m2", 0.0, 10.0)
+                d["vertrieb_m2"] = trial.suggest_int("vertrieb_m2", 0, 50)
+
+            # Bestehende Berechnung aufrufen (Rückgabewert negieren für minimize)
+            result = self._berechne(d, s_backup)
+
+            # Ziel-Metrik dynamisch auswerten
+            if ziel == "ebit":
+                score = result.get("ebit", 0.0)
+            elif ziel == "aktienkurs":
+                score = result.get("aktienkurs", 0.0)
+            elif ziel == "eigenkapital":
+                score = result.get("eigenkapital", 0.0)
+            else:  # "balanced"
+                score = (
+                    result.get("aktienkurs", 100) * 0.3 +
+                    result.get("ebit", 0) * 5.0 * 0.3 +
+                    result.get("mva", 0) * 0.2 +
+                    result.get("kz_index", 60) * 2.0 * 0.2
+                )
+
+            return -float(score)
+
+        print("  Starte KI-gestützte Bayesian Optimization (Optuna) mit 300 Trials...")
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=300)
+
+        print(f"  {'Entscheidung':<25} {'Optimal':>12}  {'Aktuell':>12}  {'Aenderung':>12}")
+        print("  " + "-"*25 + " " + "-"*12 + " " + "-"*12 + " " + "-"*12)
+
+        best_decisions = s_backup.copy()
+        for key, val in study.best_params.items():
+            best_decisions[key] = val
+            akt = s_backup.get(key, 0)
+            diff = val - akt
+
+            if isinstance(val, int) or key.endswith("menge") or key.endswith("ma") or "personal" in key:
+                print(f"  {key:<25} {int(val):>12}  {int(akt):>12}  {int(diff):>12}")
             else:
-                val = round(val, 2)
-            best_d[name] = val
+                print(f"  {key:<25} {val:>12.2f}  {akt:>12.2f}  {diff:>12.2f}")
 
-        best_d["markt2_aktiv"] = markt2_offen
-        if not markt2_offen:
-            best_d["preis_m2"] = best_d["werbung_m2"] = 0
-
-        erg = self._berechne_mit_news(best_d, state_override=s_backup, target_period=tp)
-
-        print(f"\n{'='*78}")
-        print(f"  OPTIMALE ENTSCHEIDUNGEN P{tp} – Eagle Eye V6.1")
-        print(f"{'='*78}")
-        print(f"  Ziel: {ziel} | Score: {best_score:.4f}")
-        print(f"{'='*78}")
-
-        labels = {
-            "preis_m1": "Preis M1 (EUR)", "werbung_m1": "Werbung M1 (MEUR)",
-            "vertrieb_ma": "Vertriebs-MA", "fertigungsmenge": "Fertigung (Stk)",
-            "fe_invest_gen1": "F&E Gen1 (MEUR)", "oeko_budget": "Oeko (MEUR)",
-            "ci_budget": "CI (MEUR)", "rationalisierung": "Ration. (MEUR)",
-            "wertanalyse": "Wertanalyse (MEUR)", "neue_anlagen_a": "Neue Anl.A",
-            "neue_anlagen_b": "Neue Anl.B", "personal_aenderung_fert": "Personal +/-",
-            "fe_personal_aenderung": "F&E Personal +/-",
-            "preis_m2": "Preis M2 (FCU)",
-            "werbung_m2": "Werbung M2 (MEUR)",
-            "grossabnehmer": "Grossabnehmer", "kredit": "Kredit (MEUR)",
-            "dividende": "Dividende (MEUR)",
-        }
-
-        print(f"\n  {'Entscheidung':30s} {'Optimal':>12s} {'Aktuell':>12s}  Aenderung")
-        print(f"  {'-'*30} {'-'*12} {'-'*12}  {'-'*12}")
-        for name in var_names:
-            opt = best_d[name]
-            curr = last_d.get(name, defaults.get(name, 0))
-            delta = opt - curr if isinstance(opt, (int, float)) and isinstance(curr, (int, float)) else ""
-            d_str = f"{delta:+.1f}" if isinstance(delta, float) else (f"{delta:+d}" if isinstance(delta, int) else "")
-            lbl = labels.get(name, name)
-            if isinstance(opt, int):
-                print(f"  {lbl:30s} {opt:>12d} {int(curr):>12d}  {d_str}")
-            else:
-                print(f"  {lbl:30s} {opt:>12.2f} {curr:>12.2f}  {d_str}")
+        erg = self._berechne_mit_news(best_decisions, state_override=s_backup, target_period=tp)
 
         print(f"\n  Prognostizierte Ergebnisse:")
         print(f"  {'Kennzahl':30s} {'Wert':>12s}")
@@ -2071,7 +2014,7 @@ class TOPSIM_EagleEye_V5:
                 print(f"  {label:30s} {val:>12.0f} {unit}")
         print(f"{'='*78}")
 
-        return best_d, erg
+        return best_decisions, erg
 
     def optimiere_vergleich(self, target_periode=None):
         """Optimiert fuer verschiedene Ziele und zeigt Vergleich."""
@@ -2112,6 +2055,7 @@ class TOPSIM_EagleEye_V5:
         markt2_offen = self._is_markt2_open_for_period(target_p)
         print(f"=== Entscheidungen fuer Periode {target_p} ===\n")
         d = {}
+        s = self.state
         d["preis_m1"] = _prompt_float(
             f"  Preis Markt 1 (EUR) [{self.state['preis_vor']}]: ",
             default=self.state["preis_vor"], min_val=2000, max_val=7000
@@ -2124,26 +2068,33 @@ class TOPSIM_EagleEye_V5:
             f"  Vertriebs-MA [{self.state['personal_vertrieb']}]: ",
             default=self.state["personal_vertrieb"], min_val=0
         )
+        d["einkauf_menge"] = _prompt_float(f"  Einkauf Einsatzstoffe (Stk) [{s.get('einkauf_menge', 45000)}]: ", default=s.get("einkauf_menge", 45000))
         d["fertigungsmenge"] = _prompt_int(
             "  Fertigungsmenge Gen1 (Stk) [50000]: ",
             default=50000, min_val=0
         )
-        d["fe_invest_gen1"] = _prompt_float("  F&E Gen1 (MEUR) [2.5]: ", default=2.5, min_val=0)
-        d["fe_personal_aenderung"] = _prompt_int("  F&E Personal +/- [0]: ", default=0)
-        d["oeko_budget"] = _prompt_float("  Oekologie-Budget (MEUR) [0]: ", default=0, min_val=0)
-        d["ci_budget"] = _prompt_float("  Corporate Identity (MEUR) [0]: ", default=0, min_val=0)
+        d["personal_fe"] = _prompt_float(f"  Personal F&E Gen 1 (Anzahl) [{s.get('personal_fe', 35)}]: ", default=s.get("personal_fe", 35))
+        d["personal_fe_gen2"] = _prompt_float(f"  Personal F&E Gen 2 (Anzahl) [{s.get('personal_fe_gen2', 0)}]: ", default=s.get("personal_fe_gen2", 0))
+        d["oeko_budget_gen1"] = _prompt_float(f"  Oekologie-Budget Gen 1 (MEUR) [{s.get('oeko_budget_gen1', 0.0)}]: ", default=s.get("oeko_budget_gen1", 0.0))
+        d["oeko_budget_gen2"] = _prompt_float(f"  Oekologie-Budget Gen 2 (MEUR) [{s.get('oeko_budget_gen2', 0.0)}]: ", default=s.get("oeko_budget_gen2", 0.0))
+        d["ci_budget"] = _prompt_float(f"  Corporate Identity (MEUR) [{s.get('ci_budget', 0.0)}]: ", default=s.get("ci_budget", 0.0))
         d["rationalisierung"] = _prompt_float("  Rationalisierung (MEUR) [0]: ", default=0, min_val=0)
         d["wertanalyse"] = _prompt_float("  Wertanalyse (MEUR) [0]: ", default=0, min_val=0)
         d["neue_anlagen_a"] = _prompt_int("  Neue Typ A Anlagen [0]: ", default=0, min_val=0)
         d["neue_anlagen_b"] = _prompt_int("  Neue Typ B Anlagen [0]: ", default=0, min_val=0)
         d["personal_aenderung_fert"] = _prompt_int("  Personal Fertigung +/- [0]: ", default=0)
-        d["grossabnehmer"] = _prompt_int("  Grossabnehmer Menge [0]: ", default=0, min_val=0)
+        d["grossabnehmer"] = _prompt_float(f"  Grossabnehmer Menge (Stk) [{s.get('grossabnehmer', 0)}]: ", default=s.get("grossabnehmer", 0))
+        d["plan_absatz_m1"] = _prompt_float(f"  Plan-Absatz M1 (Stk) [{s.get('plan_absatz_m1', 45000)}]: ", default=s.get("plan_absatz_m1", 45000))
+        d["plan_absatz_m2"] = _prompt_float(f"  Plan-Absatz M2 (Stk) [{s.get('plan_absatz_m2', 0)}]: ", default=s.get("plan_absatz_m2", 0))
+        mf = input(f"  Marktforschungsbericht kaufen? (j/n) [{'j' if s.get('marktforschung_aktiv') else 'n'}]: ").strip().lower()
+        d["marktforschung_aktiv"] = (mf == 'j' or (mf == '' and s.get("marktforschung_aktiv", False)))
         d["markt2_aktiv"] = False
         if markt2_offen:
             d["markt2_aktiv"] = _prompt_yes_no("  Markt 2 aktiv? (j/n)", default=False)
         if d["markt2_aktiv"]:
             d["preis_m2"] = _prompt_float("  Preis Markt 2 (EUR) [4200]: ", default=4200, min_val=2000, max_val=9000)
             d["werbung_m2"] = _prompt_float("  Werbung Markt 2 (MEUR) [0]: ", default=0, min_val=0)
+            d["vertrieb_m2"] = _prompt_float(f"  Vertriebs-MA Markt 2 [{s.get('vertrieb_m2', 0)}]: ", default=s.get("vertrieb_m2", 0))
         else:
             d["preis_m2"] = d["werbung_m2"] = 0
         d["kredit"] = _prompt_float("  Neuer Kredit (MEUR) [0]: ", default=0, min_val=0)
@@ -2160,7 +2111,7 @@ class TOPSIM_EagleEye_V5:
     # ---- Kernberechnung (V5.1 mit allen Handbuch-Mechanismen) ----
 
     def _berechne(self, decisions, state_override=None):
-        d = decisions
+        d = decisions.copy()
         s = state_override or self.state
         p = self.calibration.params
         next_p = s["periode"] + 1
@@ -2209,6 +2160,25 @@ class TOPSIM_EagleEye_V5:
             fe_change = d.get("gen2_personal", 0)
         fe_personal = s.get("personal_fe", 34) + fe_change
         fe_personal_effekt = max(0, fe_personal - p.get("fe_personal_basis", 30)) * p.get("tech_per_fe_ma", 0.1)
+
+        # F&E Investment ergibt sich jetzt aus den Loehnen der F&E-Mitarbeiter
+        personal_fe = d.get("personal_fe", s.get("personal_fe", 35.0))
+        fe_basis_gehalt = 45000.0 * (p.get("loehne_steigerung", 1.03) ** s.get("periode", 0))
+        fe_loehne_meur = (personal_fe * fe_basis_gehalt) / 1_000_000.0
+
+        # Neue Entscheidungsfelder aus TOPSIM V6.2
+        personal_fe_gen2 = d.get("personal_fe_gen2", s.get("personal_fe_gen2", 0))
+        oeko_budget_gen1 = d.get("oeko_budget_gen1", s.get("oeko_budget_gen1", 0.0))
+        oeko_budget_gen2 = d.get("oeko_budget_gen2", s.get("oeko_budget_gen2", 0.0))
+        ci_budget = d.get("ci_budget", s.get("ci_budget", 0.0))
+        grossabnehmer = d.get("grossabnehmer", s.get("grossabnehmer", 0))
+        einkauf_menge = d.get("einkauf_menge", s.get("einkauf_menge", d.get("fertigungsmenge", 45000)))
+        marktforschung_aktiv = d.get("marktforschung_aktiv", False)
+        vertrieb_m2 = d.get("vertrieb_m2", s.get("vertrieb_m2", 0))
+
+        fe_invest_gen1 = fe_loehne_meur
+        d["fe_invest_gen1"] = fe_invest_gen1  # Wird fuer tech_neu und die GuV weiterverwendet
+
         tech_neu = s["tech_index"] + p["tech_per_meur"] * d["fe_invest_gen1"] + fe_personal_effekt
 
         # --- A8: Umweltindex ---
@@ -2219,14 +2189,16 @@ class TOPSIM_EagleEye_V5:
             neue_kap_raw = neue_anlagen_gesamt * self.ANLAGEN_KAP_A
             umweltindex = (umweltindex * alte_kap + 100.0 * neue_kap_raw) / max(alte_kap + neue_kap_raw, 1)
         oeko_verbesserung = d.get("oeko_budget", 0) * 1.5
-        umweltindex = min(100.0, umweltindex + oeko_verbesserung)
+        umwelt_bonus = (oeko_budget_gen1 + oeko_budget_gen2) * 0.5
+        umweltindex = min(100.0, umweltindex + oeko_verbesserung + umwelt_bonus)
         umwelt_strafe_meur = umwelt_strafe(umweltindex)
 
         # --- A5: Bekanntheit ---
         bekanntheit_alt = s.get("bekanntheit", 49.25)
         ci_effekt = d.get("ci_budget", 0) * 1.5
+        ci_bonus = ci_budget * 0.3
         werbe_effekt = (d["werbung_m1"] - s["werbung_vor"]) * 0.3
-        bekanntheit_neu = bekanntheit_alt + ci_effekt + werbe_effekt
+        bekanntheit_neu = bekanntheit_alt + ci_effekt + ci_bonus + werbe_effekt
         bekanntheit_neu = max(30, min(90, bekanntheit_neu))
 
         # --- POT. ABSATZ: Konsistenter Nakanishi-Cooper Hybrid (V6.2) ---
@@ -2260,10 +2232,10 @@ class TOPSIM_EagleEye_V5:
 
         if "competitor_predictions" in d:
             for u, comp in d["competitor_predictions"].items():
-                if u != "U" + str(s.get("team_id", 1)):
+                if u != f"U{self.u_nr}":
                     fremde_ungedeckt += comp.get("predicted_nicht_gedeckt", 0.0)
         elif "alle_unternehmen" in d:  # Backtest-Modus
-            own_u = "U" + str(s.get("team_id", 1))
+            own_u = f"U{self.u_nr}"
             for u, comp in d["alle_unternehmen"].items():
                 if u != own_u:
                     fremde_ungedeckt += max(0.0, float(comp.get("nicht_gedeckt", 0.0)))
@@ -2273,7 +2245,7 @@ class TOPSIM_EagleEye_V5:
             preds = self.predict_competitors(target_p, mode="advanced")
             if preds and "competitor_details" in preds:
                 for u, comp in preds["competitor_details"].items():
-                    if u != "U" + str(s.get("team_id", 1)):
+                    if u != f"U{self.u_nr}":
                         fremde_ungedeckt += comp.get("predicted_nicht_gedeckt", 0.0)
 
         branche_pot_summe = max(1.0, float(s.get("branche_pot_absatz_summe", 250000)))
@@ -2297,7 +2269,7 @@ class TOPSIM_EagleEye_V5:
         markt2_aktiv = bool(d.get("markt2_aktiv", False)) and markt2_offen
 
         supply = tats_fertigungsmenge + s["lager_fertig"]
-        gross = min(d["grossabnehmer"], self.MAX_GROSSABNEHMER)
+        gross = min(grossabnehmer, self.MAX_GROSSABNEHMER)
         pot_m1_mit_spillover = nachfrage_gesamt
 
         pot_m2 = 0.0
@@ -2309,11 +2281,13 @@ class TOPSIM_EagleEye_V5:
             werbung_m2_vor = max(0.1, s.get("werbung_m2_vor", max(d.get("werbung_m2", 0), 0.1)))
             preis_ratio_m2 = max(1e-6, d.get("preis_m2", 4200) / preis_m2_vor)
             werb_ratio_m2 = max(1e-6, max(d.get("werbung_m2", 0), 0.1) / werbung_m2_vor)
+            vertrieb_ratio_m2 = max(1e-6, max(vertrieb_m2, 1) / max(s.get("vertrieb_m2", max(vertrieb_m2, 1)), 1))
             pot_m2 = (
                 m2_pot_vor
                 * (preis_ratio_m2 ** p["price_elasticity"])
                 * (werb_ratio_m2 ** p["werbung_exponent"])
                 * (tech_ratio ** (p["tech_exponent"] * 0.8))
+                * (vertrieb_ratio_m2 ** p.get("vertrieb_exponent", 0.15))
             )
             pot_m2 = max(0.0, pot_m2)
 
@@ -2419,6 +2393,8 @@ class TOPSIM_EagleEye_V5:
         werbung_ges = d["werbung_m1"] + d.get("werbung_m2", 0)
         fe_ges = d["fe_invest_gen1"] + d.get("oeko_budget", 0) + d.get("ci_budget", 0) + d.get("wertanalyse", 0)
         fix = p["fixkosten_basis"] + d.get("rationalisierung", 0)
+        if marktforschung_aktiv:
+            fix += 0.1
         fix += d["neue_anlagen_a"] * 1.25 + d.get("neue_anlagen_b", 0) * 2.5
         fix += ueberstunden_kosten
         anlagen_anzahl = s.get("anlagen_anzahl", 4)
@@ -2853,17 +2829,17 @@ class TOPSIM_EagleEye_V5:
 
     def _build_full_decisions(self, report_data, prev_data):
         dec = report_data.get("decisions", {})
+        temp_state = self._state_from_report(prev_data)
         fe_prev = prev_data.get("personal_fe_end", prev_data.get("personal_fe", 34))
         fe_curr = report_data.get("personal_fe_end", report_data.get("personal_fe", fe_prev))
         preis_m2 = dec.get("preis_m2", 0)
         werbung_m2 = dec.get("werbung_m2", 0)
         markt2_aktiv = (preis_m2 > 0 or werbung_m2 > 0) and self._is_markt2_open_for_period(report_data.get("periode", 0))
-        return {
+        full = {
             "preis_m1": dec.get("preis_m1", report_data.get("preis", prev_data.get("preis", 3000))),
             "werbung_m1": dec.get("werbung_m1", report_data.get("werbung", prev_data.get("werbung", 6.0))),
             "vertrieb_ma": dec.get("vertrieb_ma", report_data.get("vertrieb_ma", 100)),
             "fertigungsmenge": dec.get("fertigungsmenge", self.BASIS_KUMUL_FERTIGUNG),
-            "fe_invest_gen1": dec.get("fe_invest_gen1") or report_data.get("fe_invest_gen1", 2.0),
             "fe_personal_aenderung": int(round(fe_curr - fe_prev)),
             "oeko_budget": 0, "ci_budget": 0, "rationalisierung": 0, "wertanalyse": 0,
             "neue_anlagen_a": int(dec.get("neue_anlagen_a", 0)),
@@ -2875,6 +2851,17 @@ class TOPSIM_EagleEye_V5:
             "werbung_m2": float(werbung_m2) if werbung_m2 else 0,
             "kredit": 0, "dividende": 0,
         }
+        full["personal_fe"] = dec.get("personal_fe", temp_state.get("personal_fe", 35.0))
+        full["personal_fe_gen2"] = dec.get("personal_fe_gen2", temp_state.get("personal_fe_gen2", 0))
+        full["oeko_budget_gen1"] = dec.get("oeko_budget_gen1", temp_state.get("oeko_budget_gen1", 0.0))
+        full["oeko_budget_gen2"] = dec.get("oeko_budget_gen2", temp_state.get("oeko_budget_gen2", 0.0))
+        full["ci_budget"] = dec.get("ci_budget", temp_state.get("ci_budget", 0.0))
+        full["grossabnehmer"] = dec.get("grossabnehmer", temp_state.get("grossabnehmer", 0))
+        full["desinvest"] = dec.get("desinvest", temp_state.get("desinvest", []))
+        full["einkauf_menge"] = dec.get("einkauf_menge", temp_state.get("einkauf_menge", full.get("fertigungsmenge", 0)))
+        full["marktforschung_aktiv"] = dec.get("marktforschung_aktiv", False)
+        full["vertrieb_m2"] = dec.get("vertrieb_m2", temp_state.get("vertrieb_m2", 0))
+        return full
 
     def backtest(self):
         periods = self.history.all_periods()
@@ -2893,6 +2880,7 @@ class TOPSIM_EagleEye_V5:
                 continue
             target_p = periods[i + 1]
             full_dec = self._build_full_decisions(curr_data, prev_data)
+            full_dec["alle_unternehmen"] = curr_data.get("alle_unternehmen", {})
             temp_state = self._state_from_report(prev_data)
             temp_state["branche_nicht_gedeckt"] = prev_data.get("branche_nicht_gedeckt_summe", 0)
             temp_state["branche_avg_preis"] = prev_data.get("branche_avg_preis", temp_state.get("branche_avg_preis", 3000))
@@ -2979,6 +2967,7 @@ class TOPSIM_EagleEye_V5:
                     continue
                 target_p = periods[i + 1]
                 full_dec = self._build_full_decisions(curr_data, prev_data)
+                full_dec["alle_unternehmen"] = curr_data.get("alle_unternehmen", {})
                 temp_state = self._state_from_report(prev_data)
                 temp_state["branche_nicht_gedeckt"] = prev_data.get("branche_nicht_gedeckt_summe", 0)
                 temp_state["branche_avg_preis"] = prev_data.get("branche_avg_preis", 3000)
@@ -3005,6 +2994,7 @@ class TOPSIM_EagleEye_V5:
                 continue
             target_p = periods[i + 1]
             full_dec = self._build_full_decisions(curr_data, prev_data)
+            full_dec["alle_unternehmen"] = curr_data.get("alle_unternehmen", {})
             temp_state = self._state_from_report(prev_data)
             temp_state["branche_nicht_gedeckt"] = prev_data.get("branche_nicht_gedeckt_summe", 0)
             temp_state["branche_avg_preis"] = prev_data.get("branche_avg_preis", 3000)
