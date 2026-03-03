@@ -1931,6 +1931,12 @@ class TOPSIM_EagleEye_V5:
 
         def objective(trial):
             d = s_backup.copy()
+            # Fallbacks für Variablen, die nicht aktiv optimiert werden
+            d["neue_anlagen_a"] = 0
+            d["neue_anlagen_b"] = 0
+            d["personal_aenderung_fert"] = 0
+            d["fe_personal_aenderung"] = 0
+            d["markt2_aktiv"] = s_backup.get("markt2_offen", False)
 
             d["preis_m1"] = trial.suggest_float("preis_m1", 2800, 4500)
             d["werbung_m1"] = trial.suggest_float("werbung_m1", 0.0, 20.0)
