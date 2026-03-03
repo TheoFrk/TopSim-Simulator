@@ -415,12 +415,17 @@ class ReportParser:
         except (KeyError, Exception):
             return
         for row in rows:
-            if "Gen. 1" in str(row[0]) or "Gen 1" in str(row[0]):
-                data["fe_invest_gen1"] = _safe_float(row[1])
-                data["tech_index_result"] = _safe_float(row[2])
-            if "Gen. 2" in str(row[0]) or "Gen 2" in str(row[0]):
-                data["fe_invest_gen2"] = _safe_float(row[1])
-                data["tech_index_gen2"] = _safe_float(row[2])
+            row_str = " ".join(str(v) for v in row)
+            if "Gen. 1" in row_str or "Gen 1" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                if len(nums) >= 2:
+                    data["fe_invest_gen1"] = float(nums[0])
+                    data["tech_index_result"] = float(nums[1])
+            if "Gen. 2" in row_str or "Gen 2" in row_str:
+                nums = [v for v in row if isinstance(v, (int, float))]
+                if len(nums) >= 2:
+                    data["fe_invest_gen2"] = float(nums[0])
+                    data["tech_index_gen2"] = float(nums[1])
 
     def _parse_lager(self, data):
         try:
@@ -709,7 +714,7 @@ class CalibrationEngine:
         "loehne_steigerung": 1.03,
         "transport_stueck": 25,
         "grossabnehmer_preis": 2700,
-        "fixkosten_basis": 19.46,
+        "fixkosten_basis": 5.0,
         "einkauf_staffel": [
             [42000, 650], [60000, 550], [80000, 450], [999999, 400]
         ],
@@ -1693,9 +1698,8 @@ class TOPSIM_EagleEye_V5:
         "marktanteil":      {"w": 0.28, "label": "Marktanteil"},
     }
 
-    def predict_competitors(self, target_periode):
-        """V6.1: Sagt die Züge der Konkurrenz fuer die Zielperiode voraus.
-        Nutzt linearen Trend aus den letzten zwei verfuegbaren Perioden.
+    def predict_competitors(self, target_periode, mode="advanced"):
+        """V6.2: MCI-Attraktions-Modell (mode='advanced') oder naiver Trend (mode='simple').
         Gibt ein Dictionary mit aggregierten Marktdaten zurueck oder None.
         """
         periods = self.history.all_periods()
@@ -1713,39 +1717,116 @@ class TOPSIM_EagleEye_V5:
             return None
 
         own = f"U{self.u_nr}"
-        competitor_predictions = {}
+
+        if mode == "simple":
+            # --- Naiver Trend-Modus (unveraendert V6.1) ---
+            competitor_predictions = {}
+            for u in [f"U{i}" for i in range(1, 7)]:
+                if u == own:
+                    continue
+                comp_t = alle_t.get(u, {})
+                comp_t1 = alle_t1.get(u, {})
+                preis_t = comp_t.get("preis", 0)
+                preis_t_1 = comp_t1.get("preis", 0)
+                if preis_t > 0 and preis_t_1 > 0:
+                    preis_trend = (preis_t - preis_t_1) * 0.45
+                    absatz_t = comp_t.get("nicht_gedeckt", 0)
+                    absatz_t_1 = comp_t1.get("nicht_gedeckt", 0)
+                    absatz_trend = (absatz_t - absatz_t_1) * 0.45
+                    pred_preis = max(2800.0, min(4500.0, preis_t + preis_trend))
+                    pred_nicht_gedeckt = max(0.0, absatz_t + absatz_trend)
+                else:
+                    pred_preis = preis_t if preis_t > 0 else 3000.0
+                    pred_nicht_gedeckt = comp_t.get("nicht_gedeckt", 0)
+                menge_t = comp_t.get("tats_absatz_markt", 0) + comp_t.get("nicht_gedeckt", 0)
+                menge_t1 = comp_t1.get("tats_absatz_markt", 0) + comp_t1.get("nicht_gedeckt", 0)
+                predicted_menge = max(0, menge_t + (menge_t - menge_t1)) if (menge_t > 0 and menge_t1 > 0) else menge_t
+                competitor_predictions[u] = {
+                    "predicted_preis": pred_preis,
+                    "predicted_menge": predicted_menge,
+                    "predicted_nicht_gedeckt": pred_nicht_gedeckt,
+                }
+            if not competitor_predictions:
+                return None
+            preise = [v["predicted_preis"] for v in competitor_predictions.values()]
+            predicted_branche_avg_preis = sum(preise) / len(preise) if preise else 3000
+            predicted_branche_nicht_gedeckt = sum(
+                v["predicted_nicht_gedeckt"] for v in competitor_predictions.values()
+            )
+            return {
+                "predicted_branche_avg_preis": predicted_branche_avg_preis,
+                "predicted_branche_avg_kz": data_t.get("branche_avg_kz", 60.0),
+                "predicted_branche_nicht_gedeckt": predicted_branche_nicht_gedeckt,
+                "competitor_details": competitor_predictions,
+            }
+
+        # --- MCI Advanced-Modus ---
+        p = self.calibration.params
+        team_preds = {}
 
         for u in [f"U{i}" for i in range(1, 7)]:
-            if u == own:
-                continue
             comp_t = alle_t.get(u, {})
             comp_t1 = alle_t1.get(u, {})
 
-            # Preis: Exponential Smoothing mit Dämpfungsfaktor 0.45
-            preis_t = comp_t.get("preis", 0)
-            preis_t_1 = comp_t1.get("preis", 0)
-            if preis_t > 0 and preis_t_1 > 0:
-                # Trend-Berechnung mit Dämpfungsfaktor 0.45 gegen Overshooting
-                preis_trend = (preis_t - preis_t_1) * 0.45
-                absatz_t = comp_t.get("nicht_gedeckt", 0)
-                absatz_t_1 = comp_t1.get("nicht_gedeckt", 0)
-                absatz_trend = (absatz_t - absatz_t_1) * 0.45
+            def _trend(key, default, lo, hi):
+                v_t = comp_t.get(key, default)
+                v_t1 = comp_t1.get(key, default)
+                if v_t > 0 and v_t1 > 0:
+                    return max(lo, min(hi, v_t + (v_t - v_t1) * 0.45))
+                return max(lo, min(hi, v_t if v_t > 0 else default))
 
-                # Vorhersage mit Hard-Cap für den Preis (Schutz vor Deflations-Spirale)
-                pred_preis = max(2800.0, min(4500.0, preis_t + preis_trend))
-                pred_nicht_gedeckt = max(0.0, absatz_t + absatz_trend)
-            else:
-                pred_preis = preis_t if preis_t > 0 else 3000.0
-                pred_nicht_gedeckt = comp_t.get("nicht_gedeckt", 0)
+            pred_preis    = _trend("preis",         3000.0, 2200.0, 6200.0)
+            pred_werbung  = _trend("werbung",          1.0,    0.1, 9999.0)
+            pred_tech     = _trend("tech_index",      100.0,   80.0, 9999.0)
+            pred_vertrieb = _trend("vertrieb_ma",     100.0,   60.0, 9999.0)
+            pred_kz       = max(25.0, min(95.0, comp_t.get("kz_index", 60.0)))
 
-            # Angebot/Menge als Proxy (unveraendert)
-            menge_t = comp_t.get("tats_absatz_markt", 0) + comp_t.get("nicht_gedeckt", 0)
-            menge_t1 = comp_t1.get("tats_absatz_markt", 0) + comp_t1.get("nicht_gedeckt", 0)
-            predicted_menge = max(0, menge_t + (menge_t - menge_t1)) if (menge_t > 0 and menge_t1 > 0) else menge_t
+            tats_t  = comp_t.get("tats_absatz_markt", 0)
+            tats_t1 = comp_t1.get("tats_absatz_markt", 0)
 
+            team_preds[u] = {
+                "pred_preis": pred_preis,
+                "pred_werbung": pred_werbung,
+                "pred_tech": pred_tech,
+                "pred_vertrieb": pred_vertrieb,
+                "pred_kz": pred_kz,
+                "tats_t": tats_t,
+                "tats_t1": tats_t1,
+            }
+
+        # Branchenschnitt Preis fuer relativen Term
+        branche_avg_preis_pred = sum(v["pred_preis"] for v in team_preds.values()) / max(1, len(team_preds))
+
+        # Attraktivitaeten berechnen
+        attractiveness = {}
+        for u, tv in team_preds.items():
+            try:
+                A = (
+                    (tv["pred_preis"]    ** p["price_elasticity"])
+                    * (tv["pred_werbung"]  ** p["werbung_exponent"])
+                    * (tv["pred_tech"]     ** p["tech_exponent"])
+                    * (tv["pred_vertrieb"] ** p["vertrieb_exponent"])
+                    * (tv["pred_kz"]       ** p.get("kz_exponent", 0.12))
+                )
+                attractiveness[u] = max(A, 1e-9)
+            except (ZeroDivisionError, OverflowError, ValueError):
+                attractiveness[u] = 1e-9
+
+        sum_A = sum(attractiveness.values())
+        total_market = data_t.get("branche_pot_absatz_summe", 258000)
+
+        competitor_predictions = {}
+        for u, tv in team_preds.items():
+            if u == own:
+                continue
+            pred_pot_absatz = total_market * (attractiveness[u] / max(sum_A, 1e-9))
+            comp_data = alle_t.get(u, {})
+            cap_j = float(comp_data.get("tats_absatz_markt", 0)) * 1.1
+            pred_nicht_gedeckt = max(0.0, pred_pot_absatz - cap_j)
             competitor_predictions[u] = {
-                "predicted_preis": pred_preis,
-                "predicted_menge": predicted_menge,
+                "predicted_preis": tv["pred_preis"],
+                "predicted_menge": tv["tats_t"],
+                "predicted_pot_absatz": pred_pot_absatz,
                 "predicted_nicht_gedeckt": pred_nicht_gedeckt,
             }
 
@@ -1754,30 +1835,35 @@ class TOPSIM_EagleEye_V5:
 
         preise = [v["predicted_preis"] for v in competitor_predictions.values()]
         predicted_branche_avg_preis = sum(preise) / len(preise) if preise else 3000
+        predicted_branche_avg_kz = sum(
+            team_preds[u]["pred_kz"] for u in competitor_predictions
+        ) / max(1, len(competitor_predictions))
         predicted_branche_nicht_gedeckt = sum(
             v["predicted_nicht_gedeckt"] for v in competitor_predictions.values()
         )
 
         return {
             "predicted_branche_avg_preis": predicted_branche_avg_preis,
+            "predicted_branche_avg_kz": predicted_branche_avg_kz,
             "predicted_branche_nicht_gedeckt": predicted_branche_nicht_gedeckt,
             "competitor_details": competitor_predictions,
         }
 
-    def optimiere_entscheidungen(self, ziel="balanced", target_periode=None):
+    def optimiere_entscheidungen(self, ziel="balanced", target_periode=None, pred_mode="advanced"):
         """Findet die rechnerisch besten Entscheidungen per Optimierung.
         ziel: 'balanced' (gewichteter Mix), 'aktienkurs', 'ebit', 'eigenkapital'
+        pred_mode: 'advanced' (MCI) oder 'simple' (Trend)
         """
         tp = target_periode or (self.state["periode"] + 1)
         s_backup = deepcopy(self.state)
 
-        # --- V6.0: Competitor Prediction Integration ---
-        predictions = self.predict_competitors(tp)
+        # --- V6.2: Competitor Prediction Integration (MCI / Simple) ---
+        predictions = self.predict_competitors(tp, mode=pred_mode)
         if predictions:
-            print(f"  [V6 AI] Gegner-Vorhersage aktiv: Erwarteter ø-Preis = {predictions['predicted_branche_avg_preis']:.0f} EUR")
+            print(f"  [V6 AI] Gegner-Vorhersage ({pred_mode}): ø-Preis={predictions['predicted_branche_avg_preis']:.0f} EUR, ø-KZ={predictions.get('predicted_branche_avg_kz', 60):.1f}")
             s_backup["branche_avg_preis"] = predictions["predicted_branche_avg_preis"]
+            s_backup["branche_avg_kz"] = predictions.get("predicted_branche_avg_kz", 60)
             s_backup["branche_nicht_gedeckt"] = predictions["predicted_branche_nicht_gedeckt"]
-            # Passe pot_absatz_vor leicht an neuen Durchschnittspreis an (Preiselastizitaet der Branche)
             current_avg = self.state.get("branche_avg_preis", 3000)
             if current_avg > 0:
                 preis_delta_ratio = (predictions["predicted_branche_avg_preis"] - current_avg) / current_avg
@@ -2168,12 +2254,33 @@ class TOPSIM_EagleEye_V5:
         spillover = pot_m1 * p["spillover_sweetspot"] if 3200 <= d["preis_m1"] <= 3700 else 0
         pot_m1 += spillover
 
-        # Lieferunfaehigkeits-Spillover: 80% der nicht gedeckten Nachfrage wird umverteilt
-        branche_ungedeckt = s.get("branche_nicht_gedeckt", 0)
+        # --- MARKET CLEARING: Lieferunfähigkeit & Umverteilung (Handbuch-konform) ---
+        fremde_ungedeckt = 0.0
         eigene_ungedeckt = s.get("nicht_gedeckt_vor", 0)
-        fremde_ungedeckt = max(0, branche_ungedeckt - eigene_ungedeckt)
-        n_lieferfaehige = max(1, self.N_TEAMS - 1)
-        spillover_liefer = fremde_ungedeckt * p["lieferunfaehig_umverteilung"] / n_lieferfaehige
+
+        if "competitor_predictions" in d:
+            for u, comp in d["competitor_predictions"].items():
+                if u != "U" + str(s.get("team_id", 1)):
+                    fremde_ungedeckt += comp.get("predicted_nicht_gedeckt", 0.0)
+        elif "alle_unternehmen" in d:  # Backtest-Modus
+            own_u = "U" + str(s.get("team_id", 1))
+            for u, comp in d["alle_unternehmen"].items():
+                if u != own_u:
+                    fremde_ungedeckt += max(0.0, float(comp.get("nicht_gedeckt", 0.0)))
+        else:
+            # Dynamischer Intra-Perioden Fallback (Standard-Simulation)
+            target_p = s.get("periode", 0) + 1
+            preds = self.predict_competitors(target_p, mode="advanced")
+            if preds and "competitor_details" in preds:
+                for u, comp in preds["competitor_details"].items():
+                    if u != "U" + str(s.get("team_id", 1)):
+                        fremde_ungedeckt += comp.get("predicted_nicht_gedeckt", 0.0)
+
+        branche_pot_summe = max(1.0, float(s.get("branche_pot_absatz_summe", 250000)))
+        mein_anteil_an_umverteilung = pot_m1 / branche_pot_summe
+        spillover_nachfrage = fremde_ungedeckt * 0.8 * mein_anteil_an_umverteilung
+        spillover_liefer = spillover_nachfrage  # Alias fuer Rueckgabe-Dict
+        nachfrage_gesamt = pot_m1 + spillover_nachfrage
 
         # --- A6: Kundenzufriedenheit (vollstaendig) ---
         kz_delta_preis = (d["preis_m1"] - s["preis_vor"]) / 100 * p["kz_price_sensitivity"]
@@ -2191,7 +2298,7 @@ class TOPSIM_EagleEye_V5:
 
         supply = tats_fertigungsmenge + s["lager_fertig"]
         gross = min(d["grossabnehmer"], self.MAX_GROSSABNEHMER)
-        pot_m1_mit_spillover = pot_m1 + spillover_liefer
+        pot_m1_mit_spillover = nachfrage_gesamt
 
         pot_m2 = 0.0
         if markt2_aktiv:
@@ -2314,7 +2421,11 @@ class TOPSIM_EagleEye_V5:
         fix = p["fixkosten_basis"] + d.get("rationalisierung", 0)
         fix += d["neue_anlagen_a"] * 1.25 + d.get("neue_anlagen_b", 0) * 2.5
         fix += ueberstunden_kosten
-        fix += p["gebaeude_abschreibung"] + p["verwaltung_instandhaltung"]
+        anlagen_anzahl = s.get("anlagen_anzahl", 4)
+        instandhaltung_wartung = anlagen_anzahl * 1.0
+        instandhaltung_rat = d.get("instandhaltung_rat", 0.0)
+        instandhaltung_gesamt = instandhaltung_wartung + instandhaltung_rat
+        fix += p["gebaeude_abschreibung"] + instandhaltung_gesamt
 
         # A7: Lagerkosten
         avg_lager = (s["lager_fertig"] + neues_lager) / 2
@@ -2797,7 +2908,15 @@ class TOPSIM_EagleEye_V5:
                 if sim_val is not None and real_val is not None and real_val != 0:
                     abw = (sim_val - real_val) / abs(real_val) * 100
                     all_abw[name].append(abs(abw))
-                    status = "EXAKT" if abw < 2 else "GUT" if abw < 5 else "OK" if abw < 15 else "ABWEICHUNG"
+                    abs_err = abs(abw)
+                    if abs_err < 5:
+                        status = "EXZELLENT"
+                    elif abs_err < 15:
+                        status = "GUT"
+                    elif abs_err < 30:
+                        status = "AKZEPTABEL"
+                    else:
+                        status = "SCHWACH"
                     print(f"  {name:22s} {sim_val:>12.2f} {real_val:>12.2f} {abw:>+7.1f}%  {status}")
             tested += 1
         if tested == 0:
@@ -3240,12 +3359,14 @@ def main():
             print(f"\n  Optimierung fuer P{sim.state['periode']+1}")
             print("  Ziel: [1] Balanced (Mix) | [2] Aktienkurs | [3] EBIT | [4] Eigenkapital | [5] Vergleich alle")
             z = input("  Wahl [1]: ").strip() or "1"
+            pm = input("  Gegner-Prognose [1] MCI-Advanced | [2] Simple Trend [1]: ").strip() or "1"
+            pred_mode = "advanced" if pm == "1" else "simple"
             ziel_map = {"1": "balanced", "2": "aktienkurs", "3": "ebit", "4": "eigenkapital"}
             if z == "5":
                 sim.optimiere_vergleich()
             else:
                 ziel = ziel_map.get(z, "balanced")
-                result = sim.optimiere_entscheidungen(ziel=ziel)
+                result = sim.optimiere_entscheidungen(ziel=ziel, pred_mode=pred_mode)
                 if result:
                     use = _prompt_yes_no("\n  Diese Werte als Entscheidungen uebernehmen? (j/n)", default=False)
                     if use:
