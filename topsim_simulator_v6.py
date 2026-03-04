@@ -2430,7 +2430,7 @@ class TOPSIM_EagleEye_V5:
         fix = p["fixkosten_basis"] + d.get("rationalisierung", 0)
         if marktforschung_aktiv:
             fix += 0.1
-        fix += d["neue_anlagen_a"] * 1.25 + d.get("neue_anlagen_b", 0) * 2.5
+        fix += d["neue_anlagen_a"] * 1.25 + d.get("neue_anlagen_b", 0) * p.get("anlagen_fix_b", 1.0)
         fix += ueberstunden_kosten
         anlagen_anzahl = s.get("anlagen_anzahl", 4)
         instandhaltung_wartung = anlagen_anzahl * 1.0
@@ -2483,7 +2483,8 @@ class TOPSIM_EagleEye_V5:
 
         # --- BILANZ ---
         neues_ek = s["eigenkapital"] + netto - d.get("dividende", 0)
-        neues_av = s["anlagevermoegen"] - s["abschreibungen"] + d["neue_anlagen_a"] * 20 + d.get("neue_anlagen_b", 0) * 40
+        investitionen = d.get("neue_anlagen_a", 0) * p.get("anlagen_preis_a", 21.0) + d.get("neue_anlagen_b", 0) * p.get("anlagen_preis_b", 32.0)
+        neues_av = s["anlagevermoegen"] - s["abschreibungen"] + investitionen
         neuer_mva = s["mva"] + nopat * p["mva_delta_faktor"]
 
         # A1: Aktienkurs mit 11 Faktoren
@@ -3352,11 +3353,11 @@ def main():
                 existing = sim.get_news(pn)
                 nd = dict(existing) if existing else {}
                 NEWS_FELDER = [
-                    ("lohn_einkauf", "Lohn Einkauf (TEUR/MA)"),
-                    ("lohn_verwaltung", "Lohn Verwaltung (TEUR/MA)"),
-                    ("lohn_fertigung", "Lohn Fertigung (TEUR/MA)"),
-                    ("lohn_fe", "Lohn F&E (TEUR/MA)"),
-                    ("lohn_vertrieb", "Lohn Vertrieb (TEUR/MA)"),
+                    ("lohn_einkauf", "Lohn Einkauf (TEUR)"),
+                    ("lohn_verwaltung", "Lohn Verwaltung (TEUR)"),
+                    ("lohn_fertigung", "Lohn Fertigung (TEUR)"),
+                    ("lohn_fe", "Lohn F&E (TEUR)"),
+                    ("lohn_vertrieb", "Lohn Vertrieb (TEUR)"),
                     ("betriebsstoff", "Betriebsstoffe (EUR/Stk)"),
                     ("basiszins", "Zinsen Ueberziehungskr. (%)"),
                     ("transport_m1", "Transport Markt 1 (EUR/Stk)"),
@@ -3366,7 +3367,9 @@ def main():
                     ("anlagen_kap_b", "Kapazität Typ B (Stk)"),
                     ("luftfracht_preis", "Luftfracht Preis (EUR/Stk)"),
                     ("einkauf_staffel", "Einkaufsstaffel (Grenze:Preis, ...)"),
-                    ("wechselkurs", "Wechselkurs EUR/FCU"),
+                    ("wechselkurs", "Wechselkurs (EUR/FCU)"),
+                    ("anlagen_preis_b", "Kaufpreis Typ B (MEUR)"),
+                    ("anlagen_fix_b", "Fixkosten Typ B (MEUR)"),
                     ("bip_wachstum", "BIP-Wachstum (%)"),
                     ("markt2_offen", "Markt 2 offen? (ja/nein)"),
                 ]
