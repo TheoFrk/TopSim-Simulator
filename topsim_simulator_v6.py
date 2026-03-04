@@ -1951,6 +1951,7 @@ class TOPSIM_EagleEye_V5:
             # Fallbacks für Variablen, die nicht aktiv optimiert werden
             d["neue_anlagen_a"] = 0
             d["neue_anlagen_b"] = 0
+            d["neue_anlagen_c"] = 0
             d["personal_aenderung_fert"] = 0
             d["fe_personal_aenderung"] = 0
             d["markt2_aktiv"] = s_backup.get("markt2_offen", False)
@@ -2154,6 +2155,10 @@ class TOPSIM_EagleEye_V5:
         prod_idx2 = 1.0 + math.log(max(kumul_fert, self.BASIS_KUMUL_FERTIGUNG) / self.BASIS_KUMUL_FERTIGUNG) * 0.03
         tats_produktivitaet = p["grundproduktivitaet"] * prod_idx1 * prod_idx2
         personal_kapazitaet = einsetzbares_personal * tats_produktivitaet
+        fertigungsmenge_gen2 = d.get("fertigungsmenge_gen2", 0)
+        fertigungsmenge_gen1 = d.get("fertigungsmenge", 0) - fertigungsmenge_gen2
+        benoetigte_kapazitaet = fertigungsmenge_gen1 * 1 + fertigungsmenge_gen2 * 2
+        fertigungs_mitarbeiter_bedarf = (fertigungsmenge_gen1 / 50) + (fertigungsmenge_gen2 / 80)
 
         # --- B3: Rationalisierung ---
         ration_invest = d.get("rationalisierung", 0)
@@ -2164,23 +2169,26 @@ class TOPSIM_EagleEye_V5:
             s["anlagen_kapazitaet"]
             + d["neue_anlagen_a"] * self.ANLAGEN_KAP_A
             + d["neue_anlagen_b"] * p.get("anlagen_kap_b", self.ANLAGEN_KAP_B)
+            + d.get("neue_anlagen_c", 0) * p.get("anlagen_kap_c", 25000)
         )
         anlagen_kap = anlagen_kap_basis * ration_idx
 
         # --- A3: Ueberstunden ---
-        engpass_anlagen = d["fertigungsmenge"] > anlagen_kap
-        engpass_personal = d["fertigungsmenge"] > personal_kapazitaet
+        engpass_anlagen = benoetigte_kapazitaet > anlagen_kap
+        engpass_personal = fertigungs_mitarbeiter_bedarf > einsetzbares_personal
         ueberstunden_aktiv = engpass_anlagen or engpass_personal
         max_kap_anlagen = anlagen_kap * (1 + p["ueberstunden_max_pct"]) if engpass_anlagen else anlagen_kap
         max_kap_personal = personal_kapazitaet * (1 + p["ueberstunden_max_pct"]) if engpass_personal else personal_kapazitaet
-        tats_fertigungsmenge = min(d["fertigungsmenge"], max_kap_anlagen, max_kap_personal)
+        tats_benoetigte_kapazitaet = min(benoetigte_kapazitaet, max_kap_anlagen, max_kap_personal)
+        kapazitaetsquote = tats_benoetigte_kapazitaet / max(benoetigte_kapazitaet, 1)
+        tats_fertigungsmenge = d["fertigungsmenge"] * kapazitaetsquote
 
         ueberstunden_kosten = 0.0
         ueberstunden_lohnzuschlag = 0.0
-        if ueberstunden_aktiv and tats_fertigungsmenge > min(anlagen_kap, personal_kapazitaet):
+        if ueberstunden_aktiv and tats_benoetigte_kapazitaet > min(anlagen_kap, personal_kapazitaet):
             ueberstunden_kosten = p["ueberstunden_sprungfix"]
             if engpass_personal:
-                ueberstunden_anteil = (tats_fertigungsmenge - personal_kapazitaet) / max(personal_kapazitaet, 1)
+                ueberstunden_anteil = (tats_benoetigte_kapazitaet - personal_kapazitaet) / max(personal_kapazitaet, 1)
                 ueberstunden_lohnzuschlag = s.get("loehne_basis", 25.14) * ueberstunden_anteil * p["ueberstunden_lohnzuschlag"]
 
         # --- TECH (Investment + Personal) ---
@@ -2212,11 +2220,14 @@ class TOPSIM_EagleEye_V5:
 
         # --- A8: Umweltindex ---
         umweltindex = s.get("umweltindex", self.BASIS_UMWELTINDEX)
-        neue_anlagen_gesamt = d["neue_anlagen_a"] + d.get("neue_anlagen_b", 0)
-        if neue_anlagen_gesamt > 0:
+        neue_kap_fuer_umwelt = (
+            d["neue_anlagen_a"] * self.ANLAGEN_KAP_A
+            + d.get("neue_anlagen_b", 0) * p.get("anlagen_kap_b", self.ANLAGEN_KAP_B)
+            + d.get("neue_anlagen_c", 0) * p.get("anlagen_kap_c", 25000)
+        )
+        if neue_kap_fuer_umwelt > 0:
             alte_kap = s["anlagen_kapazitaet"]
-            neue_kap_raw = neue_anlagen_gesamt * self.ANLAGEN_KAP_A
-            umweltindex = (umweltindex * alte_kap + 100.0 * neue_kap_raw) / max(alte_kap + neue_kap_raw, 1)
+            umweltindex = (umweltindex * alte_kap + 100.0 * neue_kap_fuer_umwelt) / max(alte_kap + neue_kap_fuer_umwelt, 1)
         oeko_verbesserung = d.get("oeko_budget", 0) * 1.5
         umwelt_bonus = (oeko_budget_gen1 + oeko_budget_gen2) * 0.5
         umweltindex = min(100.0, umweltindex + oeko_verbesserung + umwelt_bonus)
@@ -2430,7 +2441,7 @@ class TOPSIM_EagleEye_V5:
         fix = p["fixkosten_basis"] + d.get("rationalisierung", 0)
         if marktforschung_aktiv:
             fix += 0.1
-        fix += d["neue_anlagen_a"] * 1.25 + d.get("neue_anlagen_b", 0) * p.get("anlagen_fix_b", 1.0)
+        fix += d["neue_anlagen_a"] * 1.25 + d.get("neue_anlagen_b", 0) * p.get("anlagen_fix_b", 1.0) + d.get("neue_anlagen_c", 0) * p.get("anlagen_fix_c", 6.0)
         fix += ueberstunden_kosten
         anlagen_anzahl = s.get("anlagen_anzahl", 4)
         instandhaltung_wartung = anlagen_anzahl * 1.0
@@ -2483,7 +2494,11 @@ class TOPSIM_EagleEye_V5:
 
         # --- BILANZ ---
         neues_ek = s["eigenkapital"] + netto - d.get("dividende", 0)
-        investitionen = d.get("neue_anlagen_a", 0) * p.get("anlagen_preis_a", 21.0) + d.get("neue_anlagen_b", 0) * p.get("anlagen_preis_b", 32.0)
+        investitionen = (
+            d.get("neue_anlagen_a", 0) * p.get("anlagen_preis_a", 21.0) +
+            d.get("neue_anlagen_b", 0) * p.get("anlagen_preis_b", 32.0) +
+            d.get("neue_anlagen_c", 0) * p.get("anlagen_preis_c", 0.0)
+        )
         neues_av = s["anlagevermoegen"] - s["abschreibungen"] + investitionen
         neuer_mva = s["mva"] + nopat * p["mva_delta_faktor"]
 
@@ -2515,6 +2530,7 @@ class TOPSIM_EagleEye_V5:
             s["anlagen_kapazitaet"]
             + d["neue_anlagen_a"] * self.ANLAGEN_KAP_A
             + d.get("neue_anlagen_b", 0) * p.get("anlagen_kap_b", self.ANLAGEN_KAP_B)
+            + d.get("neue_anlagen_c", 0) * p.get("anlagen_kap_c", 25000)
         )
 
         # B5: Liquiditaetsrechnung (GA 100% sofort, Einzelhandel 80/20)
@@ -2895,6 +2911,7 @@ class TOPSIM_EagleEye_V5:
             "werbung_m2": float(werbung_m2) if werbung_m2 else 0,
             "kredit": 0, "dividende": 0,
         }
+        full["neue_anlagen_c"] = dec.get("neue_anlagen_c", temp_state.get("neue_anlagen_c", 0))
         full["personal_fe"] = dec.get("personal_fe", temp_state.get("personal_fe", 35.0))
         full["personal_fe_gen2"] = dec.get("personal_fe_gen2", temp_state.get("personal_fe_gen2", 0))
         full["oeko_budget_gen1"] = dec.get("oeko_budget_gen1", temp_state.get("oeko_budget_gen1", 0.0))
