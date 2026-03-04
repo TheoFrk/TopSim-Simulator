@@ -1497,6 +1497,20 @@ class TOPSIM_EagleEye_V5:
         if "betriebsstoff" in news:
             p["betriebsstoff_stueck"] = news["betriebsstoff"]
             applied.append(f"Betriebsstoffe={news['betriebsstoff']} EUR/Stk")
+        if "anlagen_kap_b" in news:
+            p["anlagen_kap_b"] = news["anlagen_kap_b"]
+            applied.append(f"AnlagenKapB={news['anlagen_kap_b']}")
+        if "luftfracht_preis" in news:
+            p["luftfracht_preis"] = news["luftfracht_preis"]
+            applied.append(f"Luftfracht={news['luftfracht_preis']}")
+        if "einkauf_staffel" in news and isinstance(news["einkauf_staffel"], str):
+            try:
+                staffel = [[int(k.strip()), int(v.strip())] for pair in news["einkauf_staffel"].split(",") for k, v in [pair.split(":")]]
+                if staffel:
+                    p["einkauf_staffel"] = staffel
+                    applied.append("Einkaufsstaffel")
+            except Exception:
+                pass
 
         if "basiszins" in news:
             p["basiszins"] = news["basiszins"]
@@ -1555,6 +1569,9 @@ class TOPSIM_EagleEye_V5:
             "transport_m2": ("Transport Markt 2", "EUR/Stk"),
             "einstellungskosten": ("Einstellungskosten", "TEUR/MA"),
             "entlassungskosten": ("Entlassungskosten", "TEUR/MA"),
+            "anlagen_kap_b": ("Kapazität Typ B", "Stk"),
+            "luftfracht_preis": ("Luftfracht Preis", "EUR/Stk"),
+            "einkauf_staffel": ("Einkaufsstaffel", ""),
             "wechselkurs": ("Wechselkurs EUR/FCU", ""),
             "bip_wachstum": ("BIP-Wachstum", "%"),
             "markt2_offen": ("Markt 2 offen", ""),
@@ -1952,7 +1969,7 @@ class TOPSIM_EagleEye_V5:
             d["grossabnehmer"] = trial.suggest_int("grossabnehmer", 0, 15000)
 
             if s_backup.get("markt2_offen", False):
-                d["preis_m2"] = trial.suggest_float("preis_m2", 3000, 7000)
+                d["preis_m2"] = trial.suggest_float("preis_m2", 20000, 56000)
                 d["werbung_m2"] = trial.suggest_float("werbung_m2", 0.0, 10.0)
                 d["vertrieb_m2"] = trial.suggest_int("vertrieb_m2", 0, 50)
 
@@ -2104,7 +2121,7 @@ class TOPSIM_EagleEye_V5:
         if markt2_offen:
             d["markt2_aktiv"] = _prompt_yes_no("  Markt 2 aktiv? (j/n)", default=False)
         if d["markt2_aktiv"]:
-            d["preis_m2"] = _prompt_float("  Preis Markt 2 (EUR) [4200]: ", default=4200, min_val=2000, max_val=9000)
+            d["preis_m2"] = _prompt_float("  Preis Markt 2 (FCU) [28000]: ", default=28000, min_val=10000, max_val=80000)
             d["werbung_m2"] = _prompt_float("  Werbung Markt 2 (MEUR) [0]: ", default=0, min_val=0)
             d["vertrieb_m2"] = _prompt_float(f"  Vertriebs-MA Markt 2 [{s.get('vertrieb_m2', 0)}]: ", default=s.get("vertrieb_m2", 0))
         else:
@@ -2146,7 +2163,7 @@ class TOPSIM_EagleEye_V5:
         anlagen_kap_basis = (
             s["anlagen_kapazitaet"]
             + d["neue_anlagen_a"] * self.ANLAGEN_KAP_A
-            + d["neue_anlagen_b"] * self.ANLAGEN_KAP_B
+            + d["neue_anlagen_b"] * p.get("anlagen_kap_b", self.ANLAGEN_KAP_B)
         )
         anlagen_kap = anlagen_kap_basis * ration_idx
 
@@ -2330,8 +2347,14 @@ class TOPSIM_EagleEye_V5:
         material_bedarf = tats_fertigungsmenge / wertanalyse_idx
 
         # --- KOSTEN ---
-        einkauf_preis = self._einkaufspreis(tats_fertigungsmenge)
-        material_var = material_bedarf * einkauf_preis / 1e6
+        einkauf_preis = self._einkaufspreis(einkauf_menge)
+        material_regulaer = einkauf_menge * einkauf_preis / 1e6
+        fehlmenge_material = max(0, material_bedarf - einkauf_menge)
+        sonderkosten_material = fehlmenge_material * p.get("luftfracht_preis", 780) / 1e6
+        material_var = material_regulaer + sonderkosten_material
+
+        ueberschuss_material = max(0, einkauf_menge - material_bedarf)
+        lagerkosten_einsatz = ueberschuss_material * p.get("lagerkosten_einsatz_stueck", 50) / 1e6
         betriebs_var = tats_fertigungsmenge * p["betriebsstoff_stueck"] / 1e6
         transport_m1 = tats_m1 * p["transport_stueck"] / 1e6
         transport_m2 = tats_m2 * p.get("transport_m2_stueck", 75) / 1e6
@@ -2415,9 +2438,9 @@ class TOPSIM_EagleEye_V5:
         instandhaltung_gesamt = instandhaltung_wartung + instandhaltung_rat
         fix += p["gebaeude_abschreibung"] + instandhaltung_gesamt
 
-        # A7: Lagerkosten
+        # A7: Lagerkosten (Fertigerzeugnisse + Einsatzstoffe)
         avg_lager = (s["lager_fertig"] + neues_lager) / 2
-        lagerkosten = avg_lager * p["lagerkosten_fertig_stueck"] / 1e6
+        lagerkosten = (avg_lager * p["lagerkosten_fertig_stueck"] / 1e6) + lagerkosten_einsatz
 
         # A8: Umweltstrafe
         sonstiger_aufwand = umwelt_strafe_meur + nacharbeit + lagerkosten
@@ -2490,7 +2513,7 @@ class TOPSIM_EagleEye_V5:
         neue_kap_raw = (
             s["anlagen_kapazitaet"]
             + d["neue_anlagen_a"] * self.ANLAGEN_KAP_A
-            + d.get("neue_anlagen_b", 0) * self.ANLAGEN_KAP_B
+            + d.get("neue_anlagen_b", 0) * p.get("anlagen_kap_b", self.ANLAGEN_KAP_B)
         )
 
         # B5: Liquiditaetsrechnung (GA 100% sofort, Einzelhandel 80/20)
@@ -2804,6 +2827,14 @@ class TOPSIM_EagleEye_V5:
             overrides["entlassungskosten_teur"] = news["entlassungskosten"]
         if "markt2_offen" in news:
             overrides["markt2_offen"] = bool(news["markt2_offen"])
+        if "anlagen_kap_b" in news: overrides["anlagen_kap_b"] = news["anlagen_kap_b"]
+        if "luftfracht_preis" in news: overrides["luftfracht_preis"] = news["luftfracht_preis"]
+        if "einkauf_staffel" in news and isinstance(news["einkauf_staffel"], str):
+            try:
+                staffel = [[int(k.strip()), int(v.strip())] for pair in news["einkauf_staffel"].split(",") for k, v in [pair.split(":")]]
+                if staffel: overrides["einkauf_staffel"] = staffel
+            except Exception:
+                pass
         return overrides
 
     def _berechne_mit_news(self, decisions, state_override, target_period):
@@ -3259,10 +3290,10 @@ def main():
                     d["markt2_aktiv"] = False
                 if d["markt2_aktiv"]:
                     d["preis_m2"] = _prompt_float(
-                        f"    Preis M2 [{dp.get('preis_m2', 4200)}]: ",
-                        default=dp.get("preis_m2", 4200),
-                        min_val=2000,
-                        max_val=9000,
+                        f"    Preis M2 (FCU) [{dp.get('preis_m2', 28000)}]: ",
+                        default=dp.get("preis_m2", 28000),
+                        min_val=10000,
+                        max_val=80000,
                     )
                     d["werbung_m2"] = _prompt_float(
                         f"    Werbung M2 [{dp.get('werbung_m2', 0)}]: ",
@@ -3332,6 +3363,9 @@ def main():
                     ("transport_m2", "Transport Markt 2 (EUR/Stk)"),
                     ("einstellungskosten", "Einstellungskosten (TEUR/MA)"),
                     ("entlassungskosten", "Entlassungskosten (TEUR/MA)"),
+                    ("anlagen_kap_b", "Kapazität Typ B (Stk)"),
+                    ("luftfracht_preis", "Luftfracht Preis (EUR/Stk)"),
+                    ("einkauf_staffel", "Einkaufsstaffel (Grenze:Preis, ...)"),
                     ("wechselkurs", "Wechselkurs EUR/FCU"),
                     ("bip_wachstum", "BIP-Wachstum (%)"),
                     ("markt2_offen", "Markt 2 offen? (ja/nein)"),
@@ -3343,6 +3377,8 @@ def main():
                     if val:
                         if key == "markt2_offen":
                             nd[key] = val.lower() in {"1", "true", "ja", "yes", "y", "j"}
+                        elif key == "einkauf_staffel":
+                            nd[key] = val
                         else:
                             try:
                                 nd[key] = float(val)
