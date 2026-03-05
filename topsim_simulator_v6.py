@@ -250,7 +250,13 @@ class ReportParser:
         self._parse_executive(data)
         self._parse_markt(data)
         self._parse_fertigung(data)
-        self._parse_fe(data)
+        try:
+            fe_rows = self.wb.sheet("4) Forschung & Entwicklung")
+            fe_col = self._get_period_col(fe_rows)
+        except (KeyError, Exception):
+            fe_rows = None
+            fe_col = None
+        self._parse_fe(data, fe_rows, fe_col)
         self._parse_lager(data)
         self._parse_personal(data)
         self._parse_deckungsbeitrag(data)
@@ -413,28 +419,27 @@ class ReportParser:
             if "Kumulierte Fertigung" in label:
                 data["kumul_fertigung"] = self._first_numeric(row, 1)
 
-    def _parse_fe(self, data):
+    def _parse_fe(self, data, rows, col):
         try:
-            rows = self.wb.sheet("4) Forschung & Entwicklung")
+            if rows is None:
+                raise KeyError("Sheet nicht geladen")
+            for row in rows:
+                row_str = " ".join(str(v) for v in row if v not in (None, ""))
+                # Gen 1
+                if ("Gen" in row_str and "1" in row_str) or "Generation 1" in row_str:
+                    nums = [v for v in row if isinstance(v, (int, float)) and v != ""]
+                    if len(nums) >= 1:
+                        data["personal_fe"] = float(nums[0])
+                    if len(nums) >= 2:
+                        data["tech_index_result"] = float(nums[1])
+                # Gen 2
+                elif ("Gen" in row_str and "2" in row_str) or "Generation 2" in row_str:
+                    nums = [v for v in row if isinstance(v, (int, float)) and v != ""]
+                    if len(nums) >= 1:
+                        data["personal_fe_gen2"] = float(nums[0])
         except (KeyError, Exception) as e:
             print(f"  WARNUNG: Tabellenblatt '4) Forschung & Entwicklung' nicht gefunden oder fehlerhaft: {e}")
             return
-        g1_found = False
-        g2_found = False
-        for row in rows:
-            row_str = " ".join(str(v) for v in row)
-            if not g1_found and ("Gen. 1" in row_str or "Gen 1" in row_str):
-                nums = [v for v in row if isinstance(v, (int, float))]
-                if len(nums) >= 2:
-                    data["fe_invest_gen1"] = float(nums[0])
-                    data["tech_index_result"] = float(nums[1])
-                    g1_found = True
-            if not g2_found and ("Gen. 2" in row_str or "Gen 2" in row_str):
-                nums = [v for v in row if isinstance(v, (int, float))]
-                if len(nums) >= 2:
-                    data["fe_invest_gen2"] = float(nums[0])
-                    data["tech_index_gen2"] = float(nums[1])
-                    g2_found = True
 
     def _parse_lager(self, data):
         try:
@@ -631,6 +636,64 @@ class ReportParser:
         data["decisions"] = decisions
 
 
+class CopilotNewsParser:
+    """Parst TOPSIM Wirtschaftsnachrichten aus PDFs/Freitext via LLM."""
+
+    EXTRACTION_PROMPT = """Du bist ein Parser für TOPSIM Mastering General Management Wirtschaftsnachrichten.
+Extrahiere ALLE numerischen Werte aus dem folgenden Text in dieses JSON-Format:
+{"periode": null, "lohn_einkauf": null, "lohn_verwaltung": null, "lohn_fertigung": null,
+ "lohn_fe": null, "lohn_vertrieb": null, "betriebsstoff": null, "basiszins": null,
+ "transport_m1": null, "transport_m2": null, "einstellungskosten": null, "entlassungskosten": null,
+ "anlagen_kap_b": null, "luftfracht_preis": null, "einkauf_staffel": null,
+ "wechselkurs": null, "anlagen_preis_b": null, "anlagen_fix_b": null,
+ "bip_wachstum": null, "markt2_offen": null}
+Gib NUR Felder zurück die im Text erwähnt werden. Antworte NUR mit validem JSON.
+Text:\n"""
+
+    def parse_text(self, text: str) -> dict:
+        return self._llm_extract(text)
+
+    def parse_pdf(self, pdf_path: str) -> dict:
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+            text = "\n".join(page.get_text() for page in doc)
+            doc.close()
+            return self._llm_extract(text)
+        except ImportError:
+            print("  WARNUNG: pymupdf nicht installiert. pip install pymupdf")
+            return {}
+
+    def _llm_extract(self, text: str) -> dict:
+        import json
+        try:
+            import anthropic
+            client = anthropic.Anthropic()
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": self.EXTRACTION_PROMPT + text}]
+            )
+            raw = resp.content[0].text.strip()
+            return {k: v for k, v in json.loads(raw).items() if v is not None}
+        except Exception as e:
+            print(f"  WARNUNG: LLM-Extraktion fehlgeschlagen: {e}")
+            return {}
+
+    def validate_news(self, news: dict) -> list:
+        warnings = []
+        ranges = {
+            "lohn_fertigung": (25, 55), "lohn_vertrieb": (35, 65),
+            "basiszins": (4, 15), "betriebsstoff": (30, 130),
+            "einstellungskosten": (3, 25), "entlassungskosten": (5, 30),
+            "wechselkurs": (0.05, 0.5),
+        }
+        for key, (lo, hi) in ranges.items():
+            if key in news and not (lo <= news[key] <= hi):
+                warnings.append(f"  {key}={news[key]} außerhalb Normalbereich [{lo}, {hi}]")
+        return warnings
+
+
 # ---------------------------------------------------------------------------
 # History Database
 # ---------------------------------------------------------------------------
@@ -758,6 +821,8 @@ class CalibrationEngine:
         "lieferunfaehig_umverteilung": 0.80,
         "spillover_sweetspot": 0.0,
         "mva_delta_faktor": 2.44,
+        "mva_alpha": 2.44,
+        "mva_beta": 0.10,
         "betriebsstoff_stueck": 50,
         "loehne_steigerung": 1.03,
         "transport_stueck": 25,
@@ -803,6 +868,7 @@ class CalibrationEngine:
         "aktienkurs_w_kz": 0.10,
         "aktienkurs_w_umsatz": 0.05,
         "aktienkurs_w_dividende": 0.05,
+        "aktienkurs_w_kum_dividende": 0.04,
         "aktienkurs_w_fkquote": -0.10,
         "aktienkurs_w_techqual": 0.05,
         "aktienkurs_w_mva": 0.05,
@@ -872,7 +938,8 @@ class CalibrationEngine:
         self._fit_cross_section_attractiveness(history, periods)
         self._fit_tech_per_meur(history, periods)
         self._fit_mva(history, periods)
-        self._fit_kz(history, periods)
+        self.history = history.data.get("perioden", {})
+        self._fit_kz()
         self._fit_nacharbeit(history, periods)
         self._fit_sonstiger_aufwand(history, periods)
         self._fit_aktienkurs(history, periods)
@@ -1040,17 +1107,19 @@ class CalibrationEngine:
             )
             return self._fit_pot_absatz(history, periods)
 
-        Y = np.array(Y_data)
-        X = np.array(X_data)  # shape (n, 6)
+        Y_arr = np.array(Y_data, dtype=float)
+        X_arr = np.array(X_data, dtype=float)  # shape (n, 6)
 
-        def residuals(params):
-            pred = (params[0] * X[:, 0]
-                    + params[1] * X[:, 1]
-                    + params[2] * X[:, 2]
-                    + params[3] * X[:, 3]
-                    + params[4] * X[:, 4]
-                    + params[5] * X[:, 5])
-            return pred - Y
+        defaults = np.array([-1.6, 0.15, 0.3, 0.15, 0.08, 0.1], dtype=float)
+        if len(defaults) < X_arr.shape[1]:
+            defaults = np.pad(defaults, (0, X_arr.shape[1] - len(defaults)), constant_values=0.0)
+        defaults = defaults[:X_arr.shape[1]]
+
+        def residuals_regularized(params):
+            pred = X_arr @ params
+            fit_error = pred - Y_arr
+            reg = 0.1 * (params - defaults)
+            return np.concatenate([fit_error, reg])
 
         x0 = [
             self.params["price_elasticity"],
@@ -1064,7 +1133,7 @@ class CalibrationEngine:
         bounds_hi = [ 0.0, 2.0, 2.0, 2.0, 2.0, 2.0]
 
         try:
-            res = least_squares(residuals, x0, bounds=(bounds_lo, bounds_hi))
+            res = least_squares(residuals_regularized, x0, bounds=(bounds_lo, bounds_hi))
             n_obs = len(Y_data)
             self.params["price_elasticity"] = self._blend_with_default(
                 "price_elasticity", res.x[0], n_obs, 6, full_obs=24
@@ -1142,39 +1211,110 @@ class CalibrationEngine:
             print(f"  Tech-Fit fehlgeschlagen: {e}")
 
     def _fit_mva(self, history, periods):
-        vals = []
+        data_points = []
         for i in range(1, len(periods)):
             prev = history.get_period(periods[i - 1])
             curr = history.get_period(periods[i])
-            if "mva" in curr and "mva" in prev and "nopat" in curr and curr["nopat"] != 0:
-                vals.append((curr["mva"] - prev["mva"]) / curr["nopat"])
-        if len(vals) >= self.MIN_PAIRS_MVA:
-            avg = sum(vals) / len(vals)
-            self.params["mva_delta_faktor"] = self._blend_with_default(
-                "mva_delta_faktor", avg, len(vals), self.MIN_PAIRS_MVA, full_obs=4
-            )
-            print(f"  MVA-Faktor: {self.params['mva_delta_faktor']:.4f} (n={len(vals)})")
-        else:
-            print(f"  MVA-Faktor: zu wenig Uebergaenge ({len(vals)}), unveraendert.")
+            if not prev or not curr:
+                continue
+            if "mva" not in curr or "mva" not in prev or "nopat" not in curr:
+                continue
+            nopat = float(curr.get("nopat", 0))
+            curr_ek = float(curr.get("eigenkapital", 50))
+            prev_ek = float(prev.get("eigenkapital", 50))
+            data_points.append((float(curr["mva"] - prev["mva"]), nopat, curr_ek - prev_ek))
 
-    def _fit_kz(self, history, periods):
-        vals = []
-        for i in range(1, len(periods)):
-            prev = history.get_period(periods[i - 1])
-            curr = history.get_period(periods[i])
-            if all(k in curr for k in ["kz_index", "preis"]) and all(k in prev for k in ["kz_index", "preis"]):
-                dp = curr["preis"] - prev["preis"]
-                dk = curr["kz_index"] - prev["kz_index"]
-                if dp != 0:
-                    vals.append(dk / dp * 100)
-        if len(vals) >= self.MIN_PAIRS_KZ:
-            avg = sum(vals) / len(vals)
-            self.params["kz_price_sensitivity"] = self._blend_with_default(
-                "kz_price_sensitivity", avg, len(vals), self.MIN_PAIRS_KZ
+        def _fit_single_factor():
+            ratios = [dmva / nopat for dmva, nopat, _ in data_points if abs(nopat) > 1e-9]
+            if len(ratios) < self.MIN_PAIRS_MVA:
+                print(f"  MVA-Faktor: zu wenig Uebergaenge ({len(ratios)}), unveraendert.")
+                return
+            avg = sum(ratios) / len(ratios)
+            avg = max(0.0, min(3.0, avg))
+            self.params["mva_delta_faktor"] = self._blend_with_default(
+                "mva_delta_faktor", avg, len(ratios), self.MIN_PAIRS_MVA, full_obs=4
             )
-            print(f"  KZ-Sensitivität: {self.params['kz_price_sensitivity']:.4f} (n={len(vals)})")
-        else:
-            print(f"  KZ-Sensitivität: zu wenig Uebergaenge ({len(vals)}), unveraendert.")
+            self.params["mva_alpha"] = self.params["mva_delta_faktor"]
+            self.params["mva_beta"] = self.params.get("mva_beta", self.DEFAULT_PARAMS.get("mva_beta", 0.1))
+            print(f"  MVA-Ein-Faktor: {self.params['mva_delta_faktor']:.4f} (n={len(ratios)}, cap=3.0)")
+
+        if len(data_points) < 3:
+            _fit_single_factor()
+            return
+
+        Y_arr = np.array([row[0] for row in data_points], dtype=float)
+        X_arr = np.array([[row[1], row[2]] for row in data_points], dtype=float)
+
+        def residuals(params):
+            return X_arr @ params - Y_arr
+
+        x0 = [
+            self.params.get("mva_alpha", self.params.get("mva_delta_faktor", 2.44)),
+            self.params.get("mva_beta", 0.1),
+        ]
+        try:
+            res = least_squares(residuals, x0, bounds=([0.0, 0.0], [10.0, 10.0]))
+            n_obs = len(data_points)
+            self.params["mva_alpha"] = self._blend_with_default("mva_alpha", res.x[0], n_obs, 3, full_obs=6)
+            self.params["mva_beta"] = self._blend_with_default("mva_beta", res.x[1], n_obs, 3, full_obs=6)
+            self.params["mva_delta_faktor"] = self.params["mva_alpha"]
+            print(
+                f"  MVA-2F-Fit: alpha={self.params['mva_alpha']:.4f}, beta={self.params['mva_beta']:.4f}"
+                f" (n={n_obs}, cost={res.cost:.2f})"
+            )
+        except (ValueError, RuntimeError, OverflowError, FloatingPointError) as e:
+            print(f"  MVA-2F-Fit fehlgeschlagen: {e}. Fallback auf Ein-Faktor.")
+            _fit_single_factor()
+
+    def _fit_kz(self):
+        """Multivariater KZ-Fit: Preis, Lieferfähigkeit, Lager, Umwelt."""
+        periods = sorted(self.history.keys(), key=int)
+        if len(periods) < 2:
+            return
+        Y, X = [], []
+        for i in range(1, len(periods)):
+            prev = self.history[periods[i - 1]]
+            curr = self.history[periods[i]]
+            if "kz_index" not in curr or "preis" not in curr:
+                continue
+            dk = curr["kz_index"] - prev.get("kz_index", curr["kz_index"])
+            dp = (curr.get("preis", 3500) - prev.get("preis", 3500)) / 100.0
+            liefer = 1.0 if prev.get("nicht_gedeckt", 0) > 500 else 0.0
+            lager_ratio = min(prev.get("lager_fertig", 0) / max(curr.get("pot_absatz", 40000), 1) * 100, 30)
+            umwelt_delta = max(0, curr.get("umweltindex", 91.5) - 91.5)
+            Y.append(dk)
+            X.append([dp, liefer, lager_ratio, umwelt_delta])
+
+        if len(Y) < 2:
+            self.params["kz_price_sensitivity"] = max(self.params.get("kz_price_sensitivity", -0.5), -0.1)
+            self.params["kz_price_sensitivity"] = min(-0.01, self.params["kz_price_sensitivity"])
+            return
+
+        import numpy as np
+        X_arr = np.array(X)
+        Y_arr = np.array(Y)
+        try:
+            from scipy.optimize import least_squares
+
+            def residuals(c):
+                return X_arr @ c - Y_arr
+
+            # Bounds: Preiskoeff < 0, Rest > 0
+            lo = [-5.0, -3.0, -0.5, 0.0]
+            hi = [-0.01, 1.0, 0.5, 2.0]
+            r = least_squares(residuals, [-0.3, 0.5, 0.05, 0.5], bounds=(lo, hi))
+            coeffs = r.x
+            self.params["kz_price_sensitivity"] = min(-0.01, float(coeffs[0]))
+            self.params["kz_liefer_malus"] = float(coeffs[1])
+            self.params["kz_lager_malus"] = float(coeffs[2])
+            self.params["kz_umwelt_bonus"] = float(coeffs[3])
+            print(
+                f"  KZ-Fit (multivariat): preis={coeffs[0]:.3f}, liefer={coeffs[1]:.3f}, "
+                f"lager={coeffs[2]:.3f}, umwelt={coeffs[3]:.3f}"
+            )
+        except Exception as e:
+            self.params["kz_price_sensitivity"] = -0.3
+            print(f"  KZ-Fit Fallback: {e}")
 
     def _fit_nacharbeit(self, history, periods):
         """Schaetzt Nacharbeit-% aus der Differenz zwischen realem und modelliertem
@@ -1289,15 +1429,14 @@ class CalibrationEngine:
             real_sonst = d.get("sonstiger_aufwand", 0)
             if real_ebit is not None and real_umsatz is not None:
                 fert = d.get("fertigungsmenge_tats", self.BASIS_FERTIGUNG)
-                werbung = d.get("werbung", 6)
-                fe_inv = d.get("fe_invest_gen1", 0) + d.get("fe_invest_gen2", 0)
                 umw_idx = d.get("umweltindex_anlagen", self.BASIS_UMWELTINDEX)
                 betriebs = fert * self.params["betriebsstoff_stueck"] / 1e6
                 transport = d.get("absatz_gesamt", fert) * self.params["transport_stueck"] / 1e6
                 umw_strafe = umwelt_strafe(umw_idx)
                 lager = d.get("lager_fertig", 0)
                 lagerk = lager * self.params["lagerkosten_fertig_stueck"] / 1e6
-                modellierte_sonst = betriebs + transport + werbung + fe_inv + umw_strafe + lagerk + 2.0
+                # Werbung/F&E/CI sind eigene GuV-Positionen und werden hier nicht abgezogen.
+                modellierte_sonst = betriebs + transport + umw_strafe + lagerk + 2.0
                 rest = real_sonst - modellierte_sonst
                 if rest > 0:
                     vals.append(rest)
@@ -1315,36 +1454,42 @@ class CalibrationEngine:
         data_points = []
         for p_key in periods:
             d = history.get_period(p_key)
-            if d and "aktienkurs" in d and "eigenkapital" in d and "mva" in d:
+            if d and "aktienkurs" in d and "eigenkapital" in d:
                 data_points.append(d)
         if len(data_points) < self.MIN_PERIODS_AKTIENKURS:
             print(f"  Aktienkurs-Fit: zu wenig Perioden ({len(data_points)}), behalte stabile Basisgewichte.")
             return
 
         param_keys = [
-            "aktienkurs_w_ek", "aktienkurs_w_netto", "aktienkurs_w_umsatzrendite",
-            "aktienkurs_w_bekanntheit", "aktienkurs_w_kz", "aktienkurs_w_umsatz",
-            "aktienkurs_w_dividende", "aktienkurs_w_fkquote", "aktienkurs_w_techqual", "aktienkurs_w_mva",
+            "aktienkurs_w_ek", "aktienkurs_w_netto", "aktienkurs_w_dividende",
+            "aktienkurs_w_kum_dividende", "aktienkurs_w_umsatzrendite", "aktienkurs_w_bekanntheit",
+            "aktienkurs_w_umsatz", "aktienkurs_w_kz", "aktienkurs_w_fkquote", "aktienkurs_w_techqual",
         ]
 
         def predict(weights, dp):
-            ek = dp.get("eigenkapital", 30)
-            mva_val = dp.get("mva", 60)
-            netto = dp.get("periodenueberschuss", 5)
-            ur = dp.get("umsatzrendite", 5)
-            bek = dp.get("bekanntheit", 50)
-            kz = dp.get("kz_index", 60)
-            ums = dp.get("umsatz_gesamt", 130)
-            fkq = dp.get("fremdkapitalquote", 50)
-            tech = dp.get("tech_index", 100)
+            ek = dp.get("eigenkapital", 30.0)
+            netto = dp.get("periodenueberschuss", dp.get("jahresueberschuss", 5.0))
+            div = dp.get("dividende", dp.get("decisions", {}).get("dividende", 0.0))
+            kum_div = dp.get("kumul_dividende", 0.0)
+            ur = dp.get("umsatzrendite", 5.0)
+            bek = dp.get("bekanntheit", 50.0)
+            ums = dp.get("umsatz_gesamt", dp.get("umsatz", 130.0))
+            kz = dp.get("kz_index", 60.0)
+            fkq = dp.get("fremdkapitalquote", dp.get("fk_quote", 50.0))
+            tech = dp.get("tech_index", 100.0)
             score = (
-                weights[0] * ek + weights[1] * netto * 5 + weights[2] * ur * 3
-                + weights[3] * bek * 0.5 + weights[4] * kz * 0.5
-                + weights[5] * ums * 0.3 + weights[6] * 0
-                + weights[7] * fkq * 0.3 + weights[8] * tech * 0.3
-                + weights[9] * mva_val * 0.5
+                weights[0] * ek
+                + weights[1] * netto * 5
+                + weights[2] * div * 2
+                + weights[3] * kum_div * 2
+                + weights[4] * ur * 3
+                + weights[5] * bek * 0.5
+                + weights[6] * ums * 0.3
+                + weights[7] * kz * 0.5
+                + weights[8] * fkq * 0.3
+                + weights[9] * tech * 0.3
             )
-            return max(10, (ek + mva_val) * 2 * 0.5 + score * 0.5)
+            return max(10, ek * 0.8 + score * 0.5)
 
         def residuals(weights):
             return [predict(weights, dp) - dp["aktienkurs"] for dp in data_points]
@@ -1356,7 +1501,7 @@ class CalibrationEngine:
             )
             return
 
-        x0 = [self.params[k] for k in param_keys]
+        x0 = [self.params.get(k, self.DEFAULT_PARAMS.get(k, 0.0)) for k in param_keys]
         try:
             res = least_squares(residuals, x0, bounds=(-2, 2))
             for i, k in enumerate(param_keys):
@@ -1581,6 +1726,20 @@ class TOPSIM_EagleEye_V5:
             print(f"    {label:28s}: {val} {unit}")
         print(f"  {'='*60}")
 
+    def ingest_news_from_file(self, path: str, periode: int = None):
+        """Parst Wirtschaftsnachrichten automatisch aus PDF/Text."""
+        parser = CopilotNewsParser()
+        news = parser.parse_pdf(path) if path.endswith(".pdf") else parser.parse_text(open(path).read())
+        for w in parser.validate_news(news):
+            print(w)
+        p_nr = periode or news.get("periode", self.state["periode"] + 1)
+        if hasattr(self, "set_news"):
+            self.set_news(p_nr, news)
+        else:
+            self.news[p_nr] = news
+        self.apply_news(p_nr)
+        print(f"  {len(news)} News-Felder fuer P{p_nr} automatisch importiert.")
+
     # ---- Data Ingestion ----
 
     def _ingest_all_reports(self, quiet=False):
@@ -1682,6 +1841,7 @@ class TOPSIM_EagleEye_V5:
             "motivation": r.get("motivation", 50.0),
             "kumul_fertigung": r.get("kumul_fertigung", self.BASIS_KUMUL_FERTIGUNG),
             "produktivitaet_idx1": r.get("produktivitaet_index1", 1.0),
+            "prozessopt_index": r.get("prozessopt_index", 1.0),
             "produktivitaet_idx2": r.get("produktivitaet_index2", 1.0),
             "nicht_gedeckt_vor": r.get("nicht_gedeckt", 0),
             "kumul_dividende": 0,
@@ -1713,7 +1873,7 @@ class TOPSIM_EagleEye_V5:
             "nopat_vor": 8.35, "wacc": 7.43, "rating": "BB", "umweltindex": self.BASIS_UMWELTINDEX,
             "umsatzrendite_vor": 5.06, "fremdkapitalquote_vor": 63.67,
             "motivation": 50.78, "kumul_fertigung": self.BASIS_KUMUL_FERTIGUNG,
-            "produktivitaet_idx1": 1.0, "produktivitaet_idx2": 1.0,
+            "produktivitaet_idx1": 1.0, "prozessopt_index": 1.0, "produktivitaet_idx2": 1.0,
             "nicht_gedeckt_vor": 0, "kumul_dividende": 0,
             "rationalisierung_index": 1.0, "forderungen_vor": 25.8,
             "branche_avg_preis": 3000, "branche_nicht_gedeckt": 0,
@@ -2192,14 +2352,12 @@ class TOPSIM_EagleEye_V5:
                 ueberstunden_lohnzuschlag = s.get("loehne_basis", 25.14) * ueberstunden_anteil * p["ueberstunden_lohnzuschlag"]
 
         # --- TECH (Investment + Personal) ---
-        fe_change = d.get("fe_personal_aenderung")
-        if fe_change is None:
-            fe_change = d.get("gen2_personal", 0)
-        fe_personal = s.get("personal_fe", 34) + fe_change
-        fe_personal_effekt = max(0, fe_personal - p.get("fe_personal_basis", 30)) * p.get("tech_per_fe_ma", 0.1)
+        # Einzige Quelle der Wahrheit
+        personal_fe = d.get("personal_fe", s.get("personal_fe", 35))
+        fe_change = personal_fe - s.get("personal_fe", 34)
+        fe_personal_effekt = max(0, personal_fe - p.get("fe_personal_basis", 30)) * p.get("tech_per_fe_ma", 0.1)
 
-        # F&E Investment ergibt sich jetzt aus den Loehnen der F&E-Mitarbeiter
-        personal_fe = d.get("personal_fe", s.get("personal_fe", 35.0))
+        # F&E Investment ergibt sich aus den Loehnen der F&E-Mitarbeiter (Absolutwert)
         fe_basis_gehalt = 45000.0 * (p.get("loehne_steigerung", 1.03) ** s.get("periode", 0))
         fe_loehne_meur = (personal_fe * fe_basis_gehalt) / 1_000_000.0
 
@@ -2228,17 +2386,16 @@ class TOPSIM_EagleEye_V5:
         if neue_kap_fuer_umwelt > 0:
             alte_kap = s["anlagen_kapazitaet"]
             umweltindex = (umweltindex * alte_kap + 100.0 * neue_kap_fuer_umwelt) / max(alte_kap + neue_kap_fuer_umwelt, 1)
-        oeko_verbesserung = d.get("oeko_budget", 0) * 1.5
-        umwelt_bonus = (oeko_budget_gen1 + oeko_budget_gen2) * 0.5
-        umweltindex = min(100.0, umweltindex + oeko_verbesserung + umwelt_bonus)
+        oeko_total = oeko_budget_gen1 + oeko_budget_gen2
+        umweltindex = min(100.0, umweltindex + oeko_total * 1.5)
         umwelt_strafe_meur = umwelt_strafe(umweltindex)
 
         # --- A5: Bekanntheit ---
         bekanntheit_alt = s.get("bekanntheit", 49.25)
-        ci_effekt = d.get("ci_budget", 0) * 1.5
-        ci_bonus = ci_budget * 0.3
-        werbe_effekt = (d["werbung_m1"] - s["werbung_vor"]) * 0.3
-        bekanntheit_neu = bekanntheit_alt + ci_effekt + ci_bonus + werbe_effekt
+        ci_effekt = ci_budget * 1.5
+        werbe_effekt = (d.get("werbung_m1", s.get("werbung_vor", 8)) - s.get("werbung_vor", 8)) * 0.3
+        decay = -2.0 if (d.get("werbung_m1", 8) < s.get("werbung_vor", 8) * 0.5 and ci_budget < 1.0) else 0.0
+        bekanntheit_neu = bekanntheit_alt + ci_effekt + werbe_effekt + decay
         bekanntheit_neu = max(30, min(90, bekanntheit_neu))
 
         # --- POT. ABSATZ: Konsistenter Nakanishi-Cooper Hybrid (V6.2) ---
@@ -2295,11 +2452,12 @@ class TOPSIM_EagleEye_V5:
         nachfrage_gesamt = pot_m1 + spillover_nachfrage
 
         # --- A6: Kundenzufriedenheit (vollstaendig) ---
-        kz_delta_preis = (d["preis_m1"] - s["preis_vor"]) / 100 * p["kz_price_sensitivity"]
+        kz_price_sens = min(-0.01, p.get("kz_price_sensitivity", -0.3))
+        kz_delta_preis = (d["preis_m1"] - s["preis_vor"]) / 100 * kz_price_sens
         lager_alt_ratio = min(s["lager_fertig"] / max(pot_m1, 1) * 100, 30)
-        kz_delta_lager = lager_alt_ratio * p["kz_lager_penalty"]
-        kz_delta_umwelt = max(0, umweltindex - self.BASIS_UMWELTINDEX) * p["kz_umwelt_bonus"]
-        kz_delta_liefer = p["kz_lieferunfaehig_penalty"] if eigene_ungedeckt > 0 else 0
+        kz_delta_lager = lager_alt_ratio * p.get("kz_lager_malus", p.get("kz_lager_penalty", -0.05))
+        kz_delta_umwelt = max(0, umweltindex - self.BASIS_UMWELTINDEX) * p.get("kz_umwelt_bonus", 0.3)
+        kz_delta_liefer = p.get("kz_liefer_malus", p.get("kz_lieferunfaehig_penalty", -5.0)) if eigene_ungedeckt > 500 else 0
         kz_neu = s["kz_index"] + kz_delta_preis + kz_delta_lager + kz_delta_umwelt + kz_delta_liefer
         kz_neu = max(20, min(95, kz_neu))
 
@@ -2372,7 +2530,9 @@ class TOPSIM_EagleEye_V5:
         transport = transport_m1 + transport_m2
 
         # A2: Nacharbeit
-        nacharbeit_pct = p["nacharbeit_basis_pct"] + max(0, tech_neu - 100) * p["nacharbeit_tech_factor"]
+        # Überlastung erhöht Nacharbeit
+        ueberlast_zuschlag = 2.0 if ueberstunden_aktiv else 0.0
+        nacharbeit_pct = p.get("nacharbeit_pct", 4.9) + ueberlast_zuschlag
         nacharbeit = (material_var + betriebs_var) * nacharbeit_pct / 100
 
         sozial = p.get("sozialkosten_faktor", 1.48)
@@ -2381,7 +2541,6 @@ class TOPSIM_EagleEye_V5:
         loehne += ueberstunden_lohnzuschlag
 
         personal_vertrieb = d.get("vertrieb_ma", s.get("personal_vertrieb", 100))
-        personal_fe = fe_personal
 
         # Fix 2: Verwaltung + Einkauf automatisch umsatzabhaengig
         umsatz_schaetzung = s.get("pot_absatz_vor", 43000) * d["preis_m1"] / 1e6
@@ -2436,6 +2595,24 @@ class TOPSIM_EagleEye_V5:
 
         personalaufwand = loehne + gehaelter + personalwechsel_kosten
 
+        # Mitarbeitermotivation
+        mot = s.get("motivation", 50)
+        anlagen_kapazitaet = anlagen_kap
+        auslastung_pct = (tats_fertigungsmenge / max(anlagen_kapazitaet, 1)) * 100
+        auslastung_delta = -abs(auslastung_pct - 98) * 0.1
+        pers_fert_alt = s.get("personal_fert", 600)
+        pers_change_pct = abs(d.get("personal_aenderung_fert", 0)) / max(pers_fert_alt, 1) * 100
+        pers_delta = -pers_change_pct * 0.3 if pers_change_pct > 5 else 0
+        nk_delta = (p.get("sozialkosten_faktor", 1.4) - 1.4) * 5
+        motivation_neu = max(20, min(80, mot + auslastung_delta + pers_delta + nk_delta))
+
+        # Produktivitätsindex I
+        prozessopt_idx = s.get("prozessopt_index", 1.0) + d.get("rationalisierung", 0) * 0.013
+        pers_fert_neu = pers_fert_alt + d.get("personal_aenderung_fert", 0)
+        einarbeitung_idx = 1.0 - max(0, d.get("personal_aenderung_fert", 0)) / max(pers_fert_alt, 1) * 0.5
+        motivation_idx = 1.0 + (motivation_neu - 50) * 0.005
+        prod_idx1_neu = prozessopt_idx * einarbeitung_idx * motivation_idx
+
         werbung_ges = d["werbung_m1"] + d.get("werbung_m2", 0)
         fe_ges = d["fe_invest_gen1"] + d.get("oeko_budget", 0) + d.get("ci_budget", 0) + d.get("wertanalyse", 0)
         fix = p["fixkosten_basis"] + d.get("rationalisierung", 0)
@@ -2462,8 +2639,17 @@ class TOPSIM_EagleEye_V5:
         umsatz_gross = gross * p["grossabnehmer_preis"] / 1e6
         umsatz = umsatz_m1 + umsatz_m2 + umsatz_gross
 
+        # Dynamische Abschreibungen: Basis aus State + neue Investitionen
+        afa_basis = s.get("abschreibungen", 3.5)
+        neue_anlagen_a_count = d.get("neue_anlagen_a", 0)
+        neue_anlagen_b_count = d.get("neue_anlagen_b", 0)
+        neue_anlagen_c_count = d.get("neue_anlagen_c", 0)
+        afa_neu_a = neue_anlagen_a_count * p.get("anlagen_preis_a", 21.0) / p.get("anlagen_afa_perioden_a", 10)
+        afa_neu_b = neue_anlagen_b_count * p.get("anlagen_preis_b", 32.0) / p.get("anlagen_afa_perioden_b", 10)
+        abschreibungen = afa_basis + afa_neu_a + afa_neu_b
+
         # --- ERGEBNIS ---
-        kosten = material_var + betriebs_var + transport + werbung_ges + fe_ges + personalaufwand + fix + s["abschreibungen"] + sonstiger_aufwand
+        kosten = material_var + betriebs_var + transport + werbung_ges + fe_ges + personalaufwand + fix + abschreibungen + sonstiger_aufwand
         herstellkosten_gesamt = material_var + betriebs_var + loehne + nacharbeit + ueberstunden_kosten + ueberstunden_lohnzuschlag
         herstellkosten_stueck = herstellkosten_gesamt / max(tats_fertigungsmenge, 1) * 1e6
         neuer_lager_wert = neues_lager * herstellkosten_stueck / 1e6
@@ -2499,27 +2685,43 @@ class TOPSIM_EagleEye_V5:
             d.get("neue_anlagen_b", 0) * p.get("anlagen_preis_b", 32.0) +
             d.get("neue_anlagen_c", 0) * p.get("anlagen_preis_c", 0.0)
         )
-        neues_av = s["anlagevermoegen"] - s["abschreibungen"] + investitionen
-        neuer_mva = s["mva"] + nopat * p["mva_delta_faktor"]
+        neues_av = s["anlagevermoegen"] - abschreibungen + investitionen
+        mva_alpha = p.get("mva_alpha", p.get("mva_delta_faktor", 2.44))
+        mva_beta = p.get("mva_beta", 0.10)
+        delta_ek = neues_ek - s["eigenkapital"]
+        neuer_mva = s["mva"] + mva_alpha * nopat + mva_beta * delta_ek
 
-        # A1: Aktienkurs mit 11 Faktoren
+        # A1: Aktienkurs mit 10 Faktoren (ohne direkten MVA-Einfluss)
         umsatzrendite = (netto / max(umsatz, 0.1)) * 100
         fk_quote = max(0, s["ueberziehung"]) / max(neues_ek + s["ueberziehung"], 0.1) * 100
+        dividende = d.get("dividende", 0)
         kumul_div = s.get("kumul_dividende", 0) + d.get("dividende", 0)
 
+        eigenkapital_faktor = neues_ek
+        jahresueberschuss_faktor = netto
+        dividende_faktor = dividende
+        kum_dividende_faktor = kumul_div
+        umsatzrendite_faktor = umsatzrendite
+        bekanntheit_faktor = bekanntheit_neu
+        umsatz_faktor = umsatz
+        kz_index_faktor = kz_neu
+        fremdkapital_quote_faktor = fk_quote
+        tech_index_faktor = tech_neu
+        # Planungsqualitaet: nicht modellierbar (Handbuch S.33 Faktor 8)
+
         aktien_score = (
-            p["aktienkurs_w_ek"] * neues_ek
-            + p["aktienkurs_w_netto"] * netto * 5
-            + p["aktienkurs_w_umsatzrendite"] * umsatzrendite * 3
-            + p["aktienkurs_w_bekanntheit"] * bekanntheit_neu * 0.5
-            + p["aktienkurs_w_kz"] * kz_neu * 0.5
-            + p["aktienkurs_w_umsatz"] * umsatz * 0.3
-            + p["aktienkurs_w_dividende"] * kumul_div * 2
-            + p["aktienkurs_w_fkquote"] * fk_quote * 0.3
-            + p["aktienkurs_w_techqual"] * tech_neu * 0.3
-            + p["aktienkurs_w_mva"] * neuer_mva * 0.5
+            p.get("aktienkurs_w_ek", 0.25) * eigenkapital_faktor
+            + p.get("aktienkurs_w_netto", 0.20) * jahresueberschuss_faktor * 5
+            + p.get("aktienkurs_w_dividende", 0.05) * dividende_faktor * 2
+            + p.get("aktienkurs_w_kum_dividende", 0.04) * kum_dividende_faktor * 2
+            + p.get("aktienkurs_w_umsatzrendite", 0.10) * umsatzrendite_faktor * 3
+            + p.get("aktienkurs_w_bekanntheit", 0.05) * bekanntheit_faktor * 0.5
+            + p.get("aktienkurs_w_umsatz", 0.05) * umsatz_faktor * 0.3
+            + p.get("aktienkurs_w_kz", 0.10) * kz_index_faktor * 0.5
+            + p.get("aktienkurs_w_fkquote", -0.10) * fremdkapital_quote_faktor * 0.3
+            + p.get("aktienkurs_w_techqual", 0.05) * tech_index_faktor * 0.3
         )
-        aktienkurs = max(10, (neues_ek + neuer_mva) * 2 * 0.5 + aktien_score * 0.5)
+        aktienkurs = max(10, eigenkapital_faktor * 0.8 + aktien_score * 0.5)
 
         # --- EVA ---
         nce_est = neues_av + 35
@@ -2536,7 +2738,9 @@ class TOPSIM_EagleEye_V5:
         # B5: Liquiditaetsrechnung (GA 100% sofort, Einzelhandel 80/20)
         einzahlungen = (umsatz_m1 + umsatz_m2) * 0.8 + umsatz_gross + s.get("forderungen_vor", 0)
         neue_forderungen = (umsatz_m1 + umsatz_m2) * 0.2
-        neue_ueberziehung = max(0, s["ueberziehung"] - einzahlungen + kosten + zinsaufwand + steuern - d.get("kredit", 0))
+        # Abschreibungen sind nicht zahlungswirksam — aus Cash-Rechnung entfernen
+        cash_kosten = kosten - abschreibungen
+        neue_ueberziehung = max(0, s["ueberziehung"] - einzahlungen + cash_kosten + zinsaufwand + steuern - d.get("kredit", 0))
 
         return {
             "periode": next_p, "tech_index": tech_neu,
@@ -2565,7 +2769,7 @@ class TOPSIM_EagleEye_V5:
             "fix": fix, "lagerkosten": lagerkosten,
             "umwelt_strafe": umwelt_strafe_meur,
             "sonstiger_aufwand": sonstiger_aufwand,
-            "abschreibungen": s["abschreibungen"],
+            "abschreibungen": abschreibungen,
             "herstellkosten_stueck": herstellkosten_stueck,
             "neuer_lager_wert": neuer_lager_wert,
             "bestandsaenderung": bestandsaenderung,
@@ -2582,6 +2786,9 @@ class TOPSIM_EagleEye_V5:
             "anlagevermoegen": neues_av,
             "anlagen_kapazitaet": neue_kap_raw,
             "anlagen_kap_effektiv": anlagen_kap,
+            "motivation_neu": motivation_neu,
+            "prozessopt_idx": prozessopt_idx,
+            "prod_idx1_neu": prod_idx1_neu,
             "personal_kap": personal_kapazitaet,
             "tats_fertigungsmenge": tats_fertigungsmenge,
             "ueberziehung": neue_ueberziehung,
@@ -2622,9 +2829,10 @@ class TOPSIM_EagleEye_V5:
             "umweltindex": erg["umweltindex"],
             "umsatzrendite_vor": erg["umsatzrendite"],
             "fremdkapitalquote_vor": erg["fk_quote"],
-            "motivation": base.get("motivation", 50),
+            "motivation": erg.get("motivation_neu", base.get("motivation", 50)),
             "kumul_fertigung": erg["kumul_fertigung"],
-            "produktivitaet_idx1": base.get("produktivitaet_idx1", 1.0),
+            "produktivitaet_idx1": erg.get("prod_idx1_neu", base.get("produktivitaet_idx1", 1.0)),
+            "prozessopt_index": erg.get("prozessopt_idx", base.get("prozessopt_index", 1.0)),
             "produktivitaet_idx2": 1.0 + math.log(
                 max(erg["kumul_fertigung"], self.BASIS_KUMUL_FERTIGUNG) / self.BASIS_KUMUL_FERTIGUNG
             ) * 0.03,
