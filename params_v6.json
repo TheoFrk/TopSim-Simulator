@@ -1,5 +1,5 @@
 {
-  "price_elasticity": -2.3507,
+  "price_elasticity": -1.6,
   "werbung_exponent": 0.1859,
   "tech_exponent": 0.313,
   "vertrieb_exponent": 0.2984,
@@ -20,27 +20,27 @@
   "loehne_steigerung": 1.03,
   "transport_stueck": 25,
   "grossabnehmer_preis": 2700,
-  "fixkosten_basis": 23.16,
+  "fixkosten_basis": 19.46,
   "einkauf_staffel": [
     [
-      42000,
-      645.0
+      29999,
+      670
     ],
     [
-      60000,
-      550
+      49999,
+      580
     ],
     [
-      80000,
-      450
+      69999,
+      460
     ],
     [
       999999,
-      400
+      410
     ]
   ],
   "steuersatz": 0.4,
-  "nacharbeit_basis_pct": 15.0,
+  "nacharbeit_basis_pct": 4.9,
   "nacharbeit_tech_factor": 0.02,
   "lagerkosten_fertig_stueck": 100,
   "lagerkosten_einsatz_stueck": 50,
@@ -56,17 +56,17 @@
   "basiszins": 8.0,
   "gebaeude_abschreibung": 1.0,
   "verwaltung_instandhaltung": 1.0,
-  "lohn_fertigung_teur": 31,
-  "gehalt_vertrieb": 41,
-  "gehalt_fe": 45,
-  "gehalt_admin": 29,
-  "gehalt_einkauf": 31,
-  "sozialkosten_faktor": 1.5767,
+  "lohn_fertigung_teur": 34.0,
+  "gehalt_vertrieb": 45.0,
+  "gehalt_fe": 49.0,
+  "gehalt_admin": 32.0,
+  "gehalt_einkauf": 34.0,
+  "sozialkosten_faktor": 1.48,
   "einstellungskosten_teur": 5,
   "entlassungskosten_teur": 10,
   "fluktuation_rate": 0.058,
   "transport_m2_stueck": 75,
-  "wechselkurs": 0.125,
+  "wechselkurs": 0.09,
   "markt2_offen": false,
   "markt2_start_potenzial": 12000,
   "aktienkurs_w_ek": 0.25,
@@ -81,5 +81,30 @@
   "aktienkurs_w_techqual": 0.05,
   "aktienkurs_w_mva": 0.05,
   "kz_liefer_malus": 0.9999999985064644,
-  "kz_lager_malus": 0.49999999999999994
+  "kz_lager_malus": 0.49999999999999994,
+  "news": {
+    "4": {
+      "bip_wachstum": 1.8,
+      "lohn_steigerung_pct": 2.0,
+      "marktwachstum_m1": 6.0,
+      "marktwachstum_m2": 15.0,
+      "wechselkurs": 0.09,
+      "grossabnehmer_max": 7000,
+      "grossabnehmer_preis": 2650.0,
+      "zins_kurzfristig": 9.5,
+      "zins_langfristig": 7.5,
+      "zins_ueberziehung": 14.5,
+      "zins_wertpapiere": 5.5,
+      "lohn_einkauf": 34.0,
+      "lohn_verwaltung": 32.0,
+      "lohn_fertigung": 34.0,
+      "lohn_fe": 49.0,
+      "lohn_vertrieb": 45.0,
+      "einkauf_staffel": "29999:670, 49999:580, 69999:460, 999999:410",
+      "einkauf_staffel_gen2": "29999:600, 49999:480, 69999:360, 999999:320",
+      "betriebsstoff_gen2": 50.0,
+      "gen2_kap_faktor": 2,
+      "gen2_fert_pro_person": 80
+    }
+  }
 }
