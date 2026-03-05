@@ -256,7 +256,7 @@ class ReportParser:
         except (KeyError, Exception):
             fe_rows = None
             fe_col = None
-        self._parse_fe(data, fe_rows, fe_col)
+        self._parse_fe(data, fe_rows)
         self._parse_lager(data)
         self._parse_personal(data)
         self._parse_deckungsbeitrag(data)
@@ -419,7 +419,7 @@ class ReportParser:
             if "Kumulierte Fertigung" in label:
                 data["kumul_fertigung"] = self._first_numeric(row, 1)
 
-    def _parse_fe(self, data, rows, col):
+    def _parse_fe(self, data, rows):
         try:
             if rows is None:
                 raise KeyError("Sheet nicht geladen")
@@ -2529,10 +2529,12 @@ class TOPSIM_EagleEye_V5:
         transport_m2 = tats_m2 * p.get("transport_m2_stueck", 75) / 1e6
         transport = transport_m1 + transport_m2
 
-        # A2: Nacharbeit
-        # Überlastung erhöht Nacharbeit
+        # A2: Nacharbeit (Handbuch S.23)
+        basis_nacharbeit_pct = p.get("nacharbeit_basis_pct", 4.9)
+        tech_zuschlag = max(0, tech_neu - 100) * p.get("nacharbeit_tech_factor", 0.02)
         ueberlast_zuschlag = 2.0 if ueberstunden_aktiv else 0.0
-        nacharbeit_pct = p.get("nacharbeit_pct", 4.9) + ueberlast_zuschlag
+        motivation_abzug = (s.get("motivation", 50) - 50) * 0.02
+        nacharbeit_pct = max(0, basis_nacharbeit_pct + tech_zuschlag + ueberlast_zuschlag - motivation_abzug)
         nacharbeit = (material_var + betriebs_var) * nacharbeit_pct / 100
 
         sozial = p.get("sozialkosten_faktor", 1.48)
@@ -2606,12 +2608,12 @@ class TOPSIM_EagleEye_V5:
         nk_delta = (p.get("sozialkosten_faktor", 1.4) - 1.4) * 5
         motivation_neu = max(20, min(80, mot + auslastung_delta + pers_delta + nk_delta))
 
-        # Produktivitätsindex I
+        # Prod.Index I
         prozessopt_idx = s.get("prozessopt_index", 1.0) + d.get("rationalisierung", 0) * 0.013
-        pers_fert_neu = pers_fert_alt + d.get("personal_aenderung_fert", 0)
-        einarbeitung_idx = 1.0 - max(0, d.get("personal_aenderung_fert", 0)) / max(pers_fert_alt, 1) * 0.5
-        motivation_idx = 1.0 + (motivation_neu - 50) * 0.005
-        prod_idx1_neu = prozessopt_idx * einarbeitung_idx * motivation_idx
+        einarbeitung_idx = 1.0 - max(0, d.get("personal_aenderung_fert", 0)) / max(s.get("personal_fert", 1), 1) * 0.5
+        personalqual_idx = s.get("personalqual_index", 1.0)
+        motivation_idx = 1.0 + (s.get("motivation", 50) - 50) * 0.005
+        prod_idx1 = prozessopt_idx * einarbeitung_idx * personalqual_idx * motivation_idx
 
         werbung_ges = d["werbung_m1"] + d.get("werbung_m2", 0)
         fe_ges = d["fe_invest_gen1"] + d.get("oeko_budget", 0) + d.get("ci_budget", 0) + d.get("wertanalyse", 0)
@@ -2639,14 +2641,22 @@ class TOPSIM_EagleEye_V5:
         umsatz_gross = gross * p["grossabnehmer_preis"] / 1e6
         umsatz = umsatz_m1 + umsatz_m2 + umsatz_gross
 
-        # Dynamische Abschreibungen: Basis aus State + neue Investitionen
-        afa_basis = s.get("abschreibungen", 3.5)
-        neue_anlagen_a_count = d.get("neue_anlagen_a", 0)
-        neue_anlagen_b_count = d.get("neue_anlagen_b", 0)
-        neue_anlagen_c_count = d.get("neue_anlagen_c", 0)
-        afa_neu_a = neue_anlagen_a_count * p.get("anlagen_preis_a", 21.0) / p.get("anlagen_afa_perioden_a", 10)
-        afa_neu_b = neue_anlagen_b_count * p.get("anlagen_preis_b", 32.0) / p.get("anlagen_afa_perioden_b", 10)
-        abschreibungen = afa_basis + afa_neu_a + afa_neu_b
+        # Dynamische Abschreibungen (AfA)
+        anlagen_liste = s.get("anlagen_liste", [
+            {"typ": "Alt", "kap": s.get("anlagen_kapazitaet", 42000),
+             "afa": s.get("abschreibungen", 5.0), "restlaufzeit": 5}
+        ])
+        # Neue Anlagen dieser Periode virtuell hinzufügen
+        anlagen_liste_neu = [dict(a) for a in anlagen_liste]  # deep copy
+        if d.get("neue_anlagen_a", 0) > 0:
+            anlagen_liste_neu.append({"typ": "A", "kap": d["neue_anlagen_a"] * 14000,
+                                       "afa": d["neue_anlagen_a"] * 2.0, "restlaufzeit": 10})
+        if d.get("neue_anlagen_b", 0) > 0:
+            anlagen_liste_neu.append({"typ": "B", "kap": d["neue_anlagen_b"] * 30000,
+                                       "afa": d["neue_anlagen_b"] * 4.0, "restlaufzeit": 10})
+        abschreibungen = sum(a["afa"] for a in anlagen_liste_neu if a["restlaufzeit"] > 0)
+        # Restlaufzeiten für State-Fortschreibung dekrementieren
+        anlagen_liste_next = [dict(a, restlaufzeit=max(0, a["restlaufzeit"] - 1)) for a in anlagen_liste_neu]
 
         # --- ERGEBNIS ---
         kosten = material_var + betriebs_var + transport + werbung_ges + fe_ges + personalaufwand + fix + abschreibungen + sonstiger_aufwand
@@ -2686,10 +2696,11 @@ class TOPSIM_EagleEye_V5:
             d.get("neue_anlagen_c", 0) * p.get("anlagen_preis_c", 0.0)
         )
         neues_av = s["anlagevermoegen"] - abschreibungen + investitionen
-        mva_alpha = p.get("mva_alpha", p.get("mva_delta_faktor", 2.44))
-        mva_beta = p.get("mva_beta", 0.10)
-        delta_ek = neues_ek - s["eigenkapital"]
-        neuer_mva = s["mva"] + mva_alpha * nopat + mva_beta * delta_ek
+        # Erweitertes MVA Modell
+        mva_alpha = p.get("mva_alpha", 2.1185)
+        mva_beta = p.get("mva_beta", 0.075)
+        nopat_delta = nopat - s.get("nopat_vor", 0)
+        neuer_mva = s.get("mva", 60) + (nopat * mva_alpha) + (nopat_delta * mva_beta)
 
         # A1: Aktienkurs mit 10 Faktoren (ohne direkten MVA-Einfluss)
         umsatzrendite = (netto / max(umsatz, 0.1)) * 100
@@ -2788,13 +2799,14 @@ class TOPSIM_EagleEye_V5:
             "anlagen_kap_effektiv": anlagen_kap,
             "motivation_neu": motivation_neu,
             "prozessopt_idx": prozessopt_idx,
-            "prod_idx1_neu": prod_idx1_neu,
+            "prod_idx1_neu": prod_idx1,
             "personal_kap": personal_kapazitaet,
             "tats_fertigungsmenge": tats_fertigungsmenge,
             "ueberziehung": neue_ueberziehung,
             "forderungen": neue_forderungen,
             "kumul_fertigung": kumul_fert,
             "rationalisierung_index": ration_idx,
+            "anlagen_liste": anlagen_liste_next,
             "preis": d["preis_m1"], "werbung": d["werbung_m1"],
             "markt2_offen": markt2_offen, "markt2_aktiv": markt2_aktiv,
             "preis_m2": d.get("preis_m2", 0), "werbung_m2": d.get("werbung_m2", 0),
@@ -2824,6 +2836,7 @@ class TOPSIM_EagleEye_V5:
             "preis_m2_vor": erg.get("preis_m2", base.get("preis_m2_vor", 4200)),
             "werbung_m2_vor": erg.get("werbung_m2", base.get("werbung_m2_vor", 0)),
             "anlagen_kapazitaet": erg["anlagen_kapazitaet"],
+            "anlagen_liste": erg.get("anlagen_liste", base.get("anlagen_liste", [])),
             "nopat_vor": erg["nopat"], "wacc": base.get("wacc", 9.44),
             "rating": erg["rating"],
             "umweltindex": erg["umweltindex"],
