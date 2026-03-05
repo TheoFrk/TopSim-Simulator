@@ -944,6 +944,14 @@ class CalibrationEngine:
         self._fit_sonstiger_aufwand(history, periods)
         self._fit_aktienkurs(history, periods)
         self._autofit_relationships(history, periods)
+        # V7 Notfall-Safeguard: Bei weniger als 6 Perioden überschreiben wir die volatilsten
+        # Parameter hart mit den Handbuch-Werten, um Overfitting zu verhindern.
+        if len(periods) < 6:
+            self.params["nacharbeit_basis_pct"] = 4.9
+            self.params["sozialkosten_faktor"] = 1.48
+            self.params["fixkosten_basis"] = 19.46
+            self.params["price_elasticity"] = -1.60
+            print("  [V7 Safeguard] Overfitting-Schutz aktiv: Nacharbeit, Sozialkosten, Fixkosten und Elastizität auf Handbuch-Werte limitiert.")
         self.save_params()
         print("  Parameter gespeichert.\n")
         return self.params
@@ -2398,13 +2406,13 @@ class TOPSIM_EagleEye_V5:
         bekanntheit_neu = bekanntheit_alt + ci_effekt + werbe_effekt + decay
         bekanntheit_neu = max(30, min(90, bekanntheit_neu))
 
-        # --- POT. ABSATZ: Konsistenter Nakanishi-Cooper Hybrid (V6.2) ---
-        # Nutzt pot_absatz_vor als robusten Anker und korrigiert über die relative Preisposition
-        preis_ratio = d["preis_m1"] / max(s["preis_vor"], 1)
-        werb_ratio = d["werbung_m1"] / max(s["werbung_vor"], 0.1)
-        tech_ratio = tech_neu / max(s["tech_index"], 1)
-        vertrieb_ratio = d["vertrieb_ma"] / max(s.get("personal_vertrieb", 100), 1)
-        bekanntheit_ratio = bekanntheit_neu / max(bekanntheit_alt, 1)
+        # --- POT. ABSATZ (A4: +Vertrieb, A5: +Bekanntheit, +Relative Preispos.) ---
+        # V7 FIX: Verhindere die Null-Falle (Cobb-Douglas Kollaps), indem der Zähler niemals 0 wird
+        preis_ratio = max(d.get("preis_m1", 3000), 1) / max(s.get("preis_vor", 3000), 1)
+        werb_ratio = max(d.get("werbung_m1", 0), 0.1) / max(s.get("werbung_vor", 0), 0.1)
+        tech_ratio = max(tech_neu, 1) / max(s.get("tech_index", 100), 1)
+        vertrieb_ratio = max(d.get("vertrieb_ma", 0), 1) / max(s.get("personal_vertrieb", 100), 1)
+        bekanntheit_ratio = max(bekanntheit_neu, 1) / max(bekanntheit_alt, 1)
 
         branche_avg = s.get("branche_avg_preis", 3000)
         preis_relativ = d["preis_m1"] / max(branche_avg, 1)
@@ -2477,8 +2485,9 @@ class TOPSIM_EagleEye_V5:
                 m2_pot_vor = p.get("markt2_start_potenzial", 12000)
             preis_m2_vor = max(1, s.get("preis_m2_vor", d.get("preis_m2", 4200)))
             werbung_m2_vor = max(0.1, s.get("werbung_m2_vor", max(d.get("werbung_m2", 0), 0.1)))
-            preis_ratio_m2 = max(1e-6, d.get("preis_m2", 4200) / preis_m2_vor)
-            werb_ratio_m2 = max(1e-6, max(d.get("werbung_m2", 0), 0.1) / werbung_m2_vor)
+            # V7 FIX: Null-Falle M2 absichern
+            preis_ratio_m2 = max(d.get("preis_m2", 4200), 1) / preis_m2_vor
+            werb_ratio_m2 = max(d.get("werbung_m2", 0), 0.1) / werbung_m2_vor
             vertrieb_ratio_m2 = max(1e-6, max(vertrieb_m2, 1) / max(s.get("vertrieb_m2", max(vertrieb_m2, 1)), 1))
             pot_m2 = (
                 m2_pot_vor
